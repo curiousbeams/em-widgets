@@ -1,0 +1,221 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Aperture Autocorrelation</title>
+  <script id="1" type="text/markdown">
+    # Aperture autocorrelation and the double-overlap region
+
+    In a STEM experiment, information at spatial frequency ${tex`\mathbf{q}`} comes
+    from the region where two aperture discs — one shifted by ${tex`+\mathbf{q}`},
+    one by ${tex`-\mathbf{q}`} — overlap. The **autocorrelation of the aperture** is
+    exactly the map of how much overlap you get at each ${tex`\mathbf{q}`}, and so
+    sets the envelope of the contrast transfer function.
+
+    **Move the pointer over the left panel** to choose ${tex`\mathbf{q}`}. The middle
+    panel shows the two shifted discs (coloured where only one disc reaches,
+    transparent where neither does), and the right panel marks where that
+    ${tex`\mathbf{q}`} falls on the radially averaged autocorrelation.
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength,
+      angularSpatialFrequencies,
+      angularSampling,
+      softAperture,
+      toComplex,
+      fft2,
+      ifft2,
+      fftshift,
+      radialAverage,
+      applyColormap,
+      blit,
+      pointerToIndices
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="3" type="text/x-typescript" pinned="">
+    const n = 128
+  </script>
+  <script id="5" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    // Aperture semiangle [mrad].
+    const semiangle = 20
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="18" type="text/x-typescript" pinned="">
+    // The autocorrelation of a disc of radius α has support out to 2α, so the
+    // grid must reach beyond that or it wraps around and the "structure" you see
+    // is aliasing. Derive the sampling from the aperture rather than hard-coding
+    // it, so this cannot drift out of range when `semiangle` or `energy` change.
+    const fieldOfViewInAlpha = 2.5
+  </script>
+  <script id="4" type="text/x-typescript" pinned="">
+    // alpha_max = wavelength / (2 * sampling), so invert for the sampling that
+    // puts `fieldOfViewInAlpha` aperture radii at the edge of the grid.
+    const sampling = (() => {
+      const alphaMax = fieldOfViewInAlpha * semiangle * 1e-3;
+      const s = wavelength / (2 * alphaMax);
+      return [s, s];
+    })()
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    // A soft-edged aperture on a corner-centered grid, L2-normalised to match
+    // `probe_array_fourier_0_normalized` in the Python notebook.
+    const apertureArray = (() => {
+      const {alpha, phi} = angularSpatialFrequencies([n, n], sampling, wavelength);
+      const A = softAperture(alpha, phi, semiangle, angularSampling([n, n], sampling, wavelength));
+      let norm = 0;
+      for (let i = 0; i < A.length; i++) norm += A[i] * A[i];
+      norm = Math.sqrt(norm) || 1;
+      for (let i = 0; i < A.length; i++) A[i] /= norm;
+      return A;
+    })()
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    // Autocorrelation via the Wiener-Khinchin theorem: Re ifft2(|fft2(A)|²).
+    const autocorrelation = (() => {
+      const F = fft2(toComplex(apertureArray), n, n);
+      for (let i = 0; i < F.re.length; i++) {
+        F.re[i] = F.re[i] * F.re[i] + F.im[i] * F.im[i];
+        F.im[i] = 0;
+      }
+      ifft2(F, n, n);
+      return F.re;
+    })()
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    const radial = radialAverage(autocorrelation, n, n, sampling)
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    const centeredAperture = fftshift(apertureArray, n, n)
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    const reciprocalSampling = 1 / (n * sampling[0])
+  </script>
+  <script id="19" type="text/x-typescript" pinned="">
+    // Spatial frequency at which the two discs stop overlapping entirely.
+    const cutoffQ = (2 * semiangle * 1e-3) / wavelength
+  </script>
+  <script id="13" type="text/x-typescript" pinned="">
+    const panelSize = Math.max(170, Math.min(240, Math.floor((width - 48) / 3)))
+  </script>
+  <script id="14" type="text/x-typescript" pinned="">
+    // Shift the centred aperture by an integer number of pixels, zero-padding at
+    // the edges rather than wrapping (the Python pads by n//4 before np.roll).
+    const shiftedAperture = (dRow, dCol) => {
+      const out = new Float64Array(n * n);
+      for (let ix = 0; ix < n; ix++) {
+        const sx = ix - dRow;
+        if (sx < 0 || sx >= n) continue;
+        for (let iy = 0; iy < n; iy++) {
+          const sy = iy - dCol;
+          if (sy < 0 || sy >= n) continue;
+          out[ix * n + iy] = centeredAperture[sx * n + sy];
+        }
+      }
+      return out;
+    }
+  </script>
+  <script id="15" type="text/x-typescript" pinned="">
+    // A labelled panel whose caption tracks the canvas width.
+    const panelFigure = (label, extra = "") => {
+      const canvas = htl.html`<canvas
+        style="width:${panelSize}px;height:${panelSize}px;display:block;border-radius:4px;${extra}">`;
+      const node = htl.html`<figure style="margin:0;width:${panelSize}px;position:relative;">
+        ${canvas}
+        <figcaption style="font-size:12px;text-align:center;margin-top:4px;opacity:0.75;">${label}</figcaption>
+      </figure>`;
+      return {canvas, node};
+    }
+  </script>
+  <script id="16" type="text/x-typescript">
+    // One cell owns the whole widget so the three panels sit in a row and the
+    // pointer handler can update the dependent panels without rebuilding the
+    // canvas underneath the cursor.
+    const apertureOverlap = view(
+      (() => {
+        const picker = panelFigure("aperture autocorrelation", "cursor:crosshair;");
+        blit(picker.canvas, applyColormap(fftshift(autocorrelation, n, n), {colormap: "eclipse"}), n, n, {size: panelSize});
+
+        const marker = htl.html`<div style="
+          position:absolute;width:9px;height:9px;margin:-5px 0 0 -5px;
+          border:2px solid red;border-radius:50%;pointer-events:none;">`;
+        picker.node.insertBefore(marker, picker.node.firstChild.nextSibling);
+
+        const overlap = panelFigure("double-overlap region");
+        const plotSlot = htl.html`<div style="width:${panelSize}px;"></div>`;
+
+        const root = htl.html`<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start;">
+          ${picker.node}${overlap.node}${plotSlot}
+        </div>`;
+
+        // Normalise the disc profile to 0..1 so the difference reads cleanly.
+        let peak = 0;
+        for (let i = 0; i < centeredAperture.length; i++) peak = Math.max(peak, centeredAperture[i]);
+        const scale = peak || 1;
+
+        const radialData = Array.from(radial.k, (k, i) => ({k, I: radial.I[i]}));
+
+        const update = (dRow, dCol) => {
+          root.value = {dRow, dCol, q: Math.hypot(dRow, dCol) * reciprocalSampling};
+
+          marker.style.left = `${((dCol + n / 2 + 0.5) / n) * panelSize}px`;
+          marker.style.top = `${((dRow + n / 2 + 0.5) / n) * panelSize}px`;
+
+          const shifted = shiftedAperture(dRow, dCol);
+          const difference = new Float64Array(n * n);
+          const union = new Float64Array(n * n);
+          for (let i = 0; i < difference.length; i++) {
+            const a = centeredAperture[i] / scale;
+            const b = shifted[i] / scale;
+            difference[i] = b - a;
+            union[i] = Math.min(1, a + b);
+          }
+          const rgba = applyColormap(difference, {colormap: "PiYG", vmin: -1.5, vmax: 1.5});
+          for (let i = 0; i < union.length; i++) rgba[i * 4 + 3] = Math.round(union[i] * 255);
+          blit(overlap.canvas, rgba, n, n, {size: panelSize});
+
+          plotSlot.replaceChildren(
+            Plot.plot({
+              width: panelSize,
+              height: panelSize,
+              marginLeft: 44,
+              marginBottom: 36,
+              x: {label: "q (1/Å)"},
+              y: {label: "overlap", grid: true},
+              marks: [
+                Plot.areaY(radialData, {x: "k", y: "I", fillOpacity: 0.15}),
+                Plot.lineY(radialData, {x: "k", y: "I"}),
+                // The overlap must vanish at 2α — a visible check that the grid
+                // is large enough and nothing is wrapping around.
+                Plot.ruleX([cutoffQ], {strokeDasharray: "3,3", strokeOpacity: 0.5}),
+                Plot.text([{q: cutoffQ}], {
+                  x: "q",
+                  y: 0.9,
+                  text: () => "2α",
+                  dx: -10,
+                  fontSize: 11,
+                  fillOpacity: 0.6
+                }),
+                Plot.ruleX([root.value.q], {stroke: "red", strokeWidth: 1.5})
+              ]
+            })
+          );
+
+          root.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+        };
+
+        picker.canvas.addEventListener("pointermove", (event) => {
+          const {ix, iy, inside} = pointerToIndices(event, picker.canvas, n, n);
+          if (inside) update(ix - n / 2, iy - n / 2);
+        });
+
+        // Start away from the origin so all three panels are informative on load.
+        update(0, Math.round(n * 0.11));
+        return root;
+      })()
+    );
+  </script>
+</notebook>

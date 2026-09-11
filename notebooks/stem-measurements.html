@@ -1,0 +1,297 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Forming a STEM measurement</title>
+  <script id="1" type="text/markdown">
+    # Forming a STEM measurement
+
+    A converged probe is scanned over a specimen; at each position the exit wave
+    is recorded in the diffraction plane. **Hover over the potential** to move the
+    probe and watch the diffraction pattern change.
+
+    **Click to pin** the probe at a position — it then stays put while you change
+    defocus, semi-angle or energy, so you can watch one scan point respond to the
+    optics. Click again to resume hovering.
+
+    The probe panel shares the potential's field of view, so you can see directly
+    how small the probe is next to the lattice — about 2 Å across at 25 mrad.
+
+    The specimen is a real simulated FCC slab — 7 potential slices of 244 × 242 —
+    loaded lazily from a zarr ZipStore, so the page fetches ~1 MB rather than
+    bundling the array into the notebook.
+
+    *Port of `stem-measurements` from `02.stem-measurements-nb.ipynb`.*
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength,
+      complexProbe,
+      fresnelPropagator,
+      transmissionFunction,
+      multislice,
+      fft2,
+      ifft2,
+      fftshift,
+      abs,
+      applyColormap,
+      complexToRGB,
+      histogramScaling,
+      blit,
+      drawScalebar,
+      pointerToIndices,
+      cropCenter,
+      gridForm
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="3" type="text/x-typescript" pinned="">
+    import {openZarrZip, readAll} from "https://curiousbeams.github.io/em-widgets/kit/data.js"
+  </script>
+  <script id="4" type="text/x-typescript" pinned="">
+    // Lazily fetched: nothing downloads until this cell runs.
+    const potentialArray = await openZarrZip("https://curiousbeams.github.io/em-widgets/data/fcc-slab-potential.zarr.zip")
+  </script>
+  <script id="5" type="text/x-typescript" pinned="">
+    const potential = await readAll(potentialArray)
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    // [slices, nx, ny]
+    const shape = potential.shape
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    const nx = shape[1]
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    const ny = shape[2]
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    const sampling = [0.1, 0.1]
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    // Slice thickness of the simulated slab [Å].
+    const sliceThickness = 2.0
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    // Per-slice transmission functions, exp(i V). The cached potentials are
+    // already in radians, so no interaction parameter is applied here.
+    const transmission = Array.from({length: shape[0]}, (_, s) =>
+      transmissionFunction(potential.data.subarray(s * nx * ny, (s + 1) * nx * ny))
+    )
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    // Projected potential, for the left-hand panel.
+    const projected = (() => {
+      const out = new Float64Array(nx * ny);
+      for (let s = 0; s < shape[0]; s++) {
+        const offset = s * nx * ny;
+        for (let i = 0; i < out.length; i++) out[i] += potential.data[offset + i];
+      }
+      return out;
+    })()
+  </script>
+  <script id="13" type="text/x-typescript">
+    const controls = view(
+      gridForm(
+        Inputs.form({
+          defocus: Inputs.range([-150, 150], {value: 0, step: 5, label: "defocus (Å)"}),
+          semiangle: Inputs.range([5, 35], {value: 25, step: 2.5, label: "semi-angle (mrad)"}),
+          energy: Inputs.range([20, 300], {value: 80, step: 20, label: "energy (kV)"}),
+          multisliceOn: Inputs.toggle({value: true, label: "multislice operator"})
+        })
+      )
+    );
+  </script>
+  <script id="14" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(controls.energy * 1e3)
+  </script>
+  <script id="15" type="text/x-typescript" pinned="">
+    const propagator = fresnelPropagator([nx, ny], sampling, controls.energy * 1e3, sliceThickness)
+  </script>
+  <script id="16" type="text/x-typescript" pinned="">
+    // Fourier-space probe at the origin; it is shifted to the scan position by a
+    // phase ramp rather than by interpolating the array.
+    const fourierProbe = complexProbe({
+      gpts: [nx, ny],
+      sampling,
+      energy: controls.energy * 1e3,
+      semiangleCutoff: controls.semiangle,
+      aberrations: {C10: -controls.defocus}
+    })
+  </script>
+  <script id="21" type="text/x-typescript" pinned="">
+    // Central region shown in the diffraction panel, matching the Python's
+    // `[74:-74, 73:-73]` crop.
+    const cropSize = 96
+  </script>
+  <script id="24" type="text/x-typescript" pinned="">
+    // Scan position and pin state. This cell depends only on the grid size, so
+    // it is NOT re-run when a slider changes — the probe therefore stays where
+    // you put it while you sweep defocus or semi-angle, which is the whole point
+    // of being able to pin it.
+    const scanState = {row: Math.round(nx / 2), col: Math.round(ny / 2), pinned: false}
+  </script>
+  <script id="17" type="text/x-typescript" pinned="">
+    const panelSize = Math.max(150, Math.min(230, Math.floor((width - 40) / 3)))
+  </script>
+  <script id="18" type="text/x-typescript" pinned="">
+    const panelFigure = (label, extra = "") => {
+      const canvas = htl.html`<canvas
+        style="width:${panelSize}px;height:${panelSize}px;display:block;border-radius:4px;${extra}">`;
+      const node = htl.html`<figure style="margin:0;width:${panelSize}px;position:relative;">
+        ${canvas}
+        <figcaption style="font-size:12px;text-align:center;margin-top:4px;opacity:0.75;">${label}</figcaption>
+      </figure>`;
+      return {canvas, node};
+    }
+  </script>
+  <script id="19" type="text/x-typescript" pinned="">
+    // Move the probe by multiplying its Fourier transform by a phase ramp — exact,
+    // and far cheaper than rebuilding the probe.
+    const shiftedProbe = (probe, row, col) => {
+      const out = {re: new Float64Array(nx * ny), im: new Float64Array(nx * ny)};
+      for (let ix = 0; ix < nx; ix++) {
+        const kx = (ix < (nx + 1) >> 1 ? ix : ix - nx) / nx;
+        for (let iy = 0; iy < ny; iy++) {
+          const ky = (iy < (ny + 1) >> 1 ? iy : iy - ny) / ny;
+          const a = -2 * Math.PI * (kx * row + ky * col);
+          const c = Math.cos(a), s = Math.sin(a);
+          const i = ix * ny + iy;
+          out.re[i] = probe.re[i] * c - probe.im[i] * s;
+          out.im[i] = probe.re[i] * s + probe.im[i] * c;
+        }
+      }
+      return out;
+    }
+  </script>
+  <script id="20" type="text/x-typescript">
+    const stemMeasurement = view(
+      (() => {
+        const potentialPanel = panelFigure("projected potential", "cursor:crosshair;");
+        blit(
+          potentialPanel.canvas,
+          applyColormap(histogramScaling(projected), {colormap: "magma"}),
+          nx, ny, {size: panelSize}
+        );
+        const ctx = potentialPanel.canvas.getContext("2d");
+        drawScalebar(ctx, {extent: ny * sampling[1], units: "Å"});
+
+        const marker = htl.html`<div style="
+          position:absolute;border-radius:50%;pointer-events:none;
+          transition:width 80ms, height 80ms, margin 80ms;">`;
+
+        const styleMarker = () => {
+          const size = scanState.pinned ? 13 : 11;
+          Object.assign(marker.style, {
+            width: `${size}px`,
+            height: `${size}px`,
+            margin: `${-size / 2 - 1}px 0 0 ${-size / 2 - 1}px`,
+            border: `2px solid #4ade80`,
+            background: scanState.pinned ? "#4ade80" : "transparent",
+            boxShadow: scanState.pinned ? "0 0 0 2px rgba(0,0,0,0.45)" : "none"
+          });
+        };
+        potentialPanel.node.insertBefore(marker, potentialPanel.node.firstChild.nextSibling);
+
+        const probePanel = panelFigure("probe");
+        const dpPanel = panelFigure("diffraction pattern");
+        const timing = htl.html`<div style="font-size:11px;opacity:0.6;margin-top:6px;text-align:center;"></div>`;
+
+        const root = htl.html`<div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
+            ${potentialPanel.node}${probePanel.node}${dpPanel.node}
+          </div>
+          ${timing}
+        </div>`;
+
+        const update = (row, col) => {
+          const started = performance.now();
+          scanState.row = row;
+          scanState.col = col;
+          root.value = {row, col, pinned: scanState.pinned};
+          styleMarker();
+
+          marker.style.left = `${((col + 0.5) / ny) * panelSize}px`;
+          marker.style.top = `${((row + 0.5) / nx) * panelSize}px`;
+
+          // Real-space probe at this scan position.
+          const psiFourier = shiftedProbe(fourierProbe, row, col);
+          const psi = ifft2(
+            {re: Float64Array.from(psiFourier.re), im: Float64Array.from(psiFourier.im)},
+            nx, ny
+          );
+          // `psi` is already at the scan position, over the same field of view
+          // as the potential — so the probe visibly moves with the pointer, and
+          // its size is directly comparable to the lattice next to it. Do NOT
+          // fftshift: that would undo the scan shift and re-centre it.
+          blit(
+            probePanel.canvas,
+            complexToRGB(psi, {vmin: 0, vmax: 1}),
+            nx, ny, {size: panelSize}
+          );
+          drawScalebar(probePanel.canvas.getContext("2d"), {extent: ny * sampling[1], units: "Å"});
+
+          // Exit wave: full multislice, or a single projected slice.
+          const exit = controls.multisliceOn
+            ? multislice(psi, transmission, propagator, nx, ny)
+            : (() => {
+                const single = {re: Float64Array.from(psi.re), im: Float64Array.from(psi.im)};
+                for (let i = 0; i < single.re.length; i++) {
+                  const c = Math.cos(projected[i]), s = Math.sin(projected[i]);
+                  const r = single.re[i];
+                  single.re[i] = r * c - single.im[i] * s;
+                  single.im[i] = r * s + single.im[i] * c;
+                }
+                return single;
+              })();
+
+          const dp = abs(fft2({re: exit.re, im: exit.im}, nx, ny));
+          // sqrt scaling, as in the Python (`**(2 * dp_power)` with dp_power 0.25)
+          for (let i = 0; i < dp.length; i++) dp[i] = Math.sqrt(dp[i]);
+          const dpCrop = cropCenter(fftshift(dp, nx, ny), nx, ny, cropSize);
+          blit(
+            dpPanel.canvas,
+            applyColormap(histogramScaling(dpCrop.data, {vmin: 0, vmax: 1}), {colormap: "magma"}),
+            dpCrop.nx, dpCrop.ny, {size: panelSize}
+          );
+
+          timing.textContent =
+            `${controls.multisliceOn ? `${shape[0]}-slice multislice` : "single slice"} ` +
+            `at ${nx}×${ny} — ${(performance.now() - started).toFixed(0)} ms/frame · ` +
+            (scanState.pinned ? "pinned, click to release" : "click to pin the probe");
+          root.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+        };
+
+        // Hover to scan, as in the Python (`motion_notify_event`). A frame costs
+        // ~100 ms, so coalesce to at most one recompute per animation frame —
+        // otherwise a quick sweep queues up dozens of stale frames.
+        let pending = null;
+        let scheduled = false;
+        potentialPanel.canvas.addEventListener("pointermove", (event) => {
+          if (scanState.pinned) return;
+          const {ix, iy, inside} = pointerToIndices(event, potentialPanel.canvas, nx, ny);
+          if (!inside) return;
+          pending = [ix, iy];
+          if (scheduled) return;
+          scheduled = true;
+          requestAnimationFrame(() => {
+            scheduled = false;
+            const [row, col] = pending;
+            update(row, col);
+          });
+        });
+
+        // Click pins the probe where you clicked; clicking again releases it.
+        // Pinning lets you hold a scan position while you change the sliders.
+        potentialPanel.canvas.addEventListener("click", (event) => {
+          const {ix, iy, inside} = pointerToIndices(event, potentialPanel.canvas, nx, ny);
+          if (!inside) return;
+          scanState.pinned = !scanState.pinned;
+          update(ix, iy);
+        });
+
+        // Restore the position held in `scanState`, so a slider change does not
+        // knock the probe back to the middle of the specimen.
+        update(scanState.row, scanState.col);
+        return root;
+      })()
+    );
+  </script>
+</notebook>

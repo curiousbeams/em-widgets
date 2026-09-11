@@ -1,0 +1,18 @@
+# A throwaway MyST project used to verify the {anywidget} path end-to-end.
+# Run `npx myst start` (or `myst start`) from this directory.
+#
+# `static_files` copies these directories verbatim into the built site's public
+# folder, so the notebooks and the kit are served at /notebooks/ and /kit/.
+# That is also how you would serve them from a MyST site directly, if you ever
+# prefer that to hosting them on the em-widgets GitHub Pages origin.
+version: 1
+project:
+  title: em-widgets demo
+  static_files:
+    - ../notebooks
+    - ../kit
+    - ../data
+  toc:
+    - file: index.md
+site:
+  template: book-theme

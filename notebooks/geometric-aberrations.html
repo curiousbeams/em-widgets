@@ -1,0 +1,144 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Geometric Aberrations</title>
+  <script id="1" type="text/markdown">
+    # Geometric aberrations
+
+    The wave aberration function ${tex`\chi(\alpha, \phi)`} describes the phase error
+    a lens imprints on the electron wave. Its **gradient** is the transverse
+    displacement of a geometric ray, so the same coefficients that produce the phase
+    rings on the left produce the image distortion on the right.
+
+    Move a slider and watch all three panels respond together.
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength,
+      angularSpatialFrequencies,
+      checkerboard,
+      chi,
+      rayDisplacement,
+      warpNearest,
+      fftshift,
+      applyColormap,
+      blit,
+      drawQuiver,
+      gridForm
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="3" type="text/x-typescript" pinned="">
+    // Grid parameters. 256 x 256 keeps every slider drag interactive; the Python
+    // widget used 512 x 512, which is also fine if you want more detail.
+    const gpts = [256, 256]
+  </script>
+  <script id="4" type="text/x-typescript" pinned="">
+    const sampling = [0.2, 0.2]
+  </script>
+  <script id="5" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    // Reciprocal sampling per axis, 1 / (gpts * sampling).
+    const reciprocalSampling = [1 / (gpts[0] * sampling[0]), 1 / (gpts[1] * sampling[1])]
+  </script>
+  <script id="8" type="text/x-typescript">
+    // Angles are exposed in degrees: whole-number steps read better than
+    // multiples of π/48, which land on values like -2e-16.
+    const controls = view(
+      gridForm(
+        Inputs.form({
+          C10: Inputs.range([-10, 10], {value: -4, step: 0.1, label: "C₁₀ defocus (Å)"}),
+          C12: Inputs.range([0, 10], {value: 3, step: 0.1, label: "C₁₂ astigmatism (Å)"}),
+          C30: Inputs.range([-500, 500], {value: 250, step: 1, label: "C₃₀ spherical (Å)"}),
+          phi12: Inputs.range([-90, 90], {value: 0, step: 1, label: "φ₁₂ (°)"}),
+          C21: Inputs.range([0, 100], {value: 0, step: 1, label: "C₂₁ coma (Å)"}),
+          phi21: Inputs.range([-180, 180], {value: 0, step: 1, label: "φ₂₁ (°)"})
+        })
+      )
+    );
+  </script>
+  <script id="19" type="text/x-typescript" pinned="">
+    // The kit expects azimuths in radians.
+    const aberrations = {
+      C10: controls.C10,
+      C30: controls.C30,
+      C12: controls.C12,
+      phi12: (controls.phi12 * Math.PI) / 180,
+      C21: controls.C21,
+      phi21: (controls.phi21 * Math.PI) / 180
+    }
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    // Angular coordinates, computed once — they do not depend on the sliders.
+    const angular = angularSpatialFrequencies(gpts, sampling, wavelength)
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    const pattern = checkerboard(gpts, 16)
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    // The centred aberration surface for the current slider values.
+    const chiCentered = fftshift(
+      chi(angular.alpha, angular.phi, wavelength, aberrations),
+      gpts[0],
+      gpts[1]
+    )
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    const displacement = rayDisplacement(chiCentered, gpts[0], gpts[1], reciprocalSampling)
+  </script>
+  <script id="13" type="text/x-typescript" pinned="">
+    // One labelled canvas, sized to `panelSize`.
+    const panelFigure = (label) => {
+      const canvas = htl.html`<canvas
+        style="width:${panelSize}px;height:${panelSize}px;display:block;border-radius:4px;">`;
+      const node = htl.html`<figure style="margin:0;width:${panelSize}px;">
+        ${canvas}
+        <figcaption style="font-size:12px;text-align:center;margin-top:4px;opacity:0.75;">${label}</figcaption>
+      </figure>`;
+      return {canvas, node};
+    }
+  </script>
+  <script id="15" type="text/x-typescript" pinned="">
+    const panelSize = Math.max(180, Math.min(280, Math.floor((width - 32) / 3)))
+  </script>
+  <script id="16" type="text/x-typescript" pinned="">
+    // sin(chi): the familiar phase-contrast rings.
+    const sinChi = Float64Array.from(chiCentered, Math.sin)
+  </script>
+  <script id="17" type="text/x-typescript" pinned="">
+    // Geometric distortion of a checkerboard, with a mask marking samples pulled
+    // in from outside the original frame.
+    const warp = warpNearest(pattern, gpts[0], gpts[1], displacement.uRow, displacement.uCol)
+  </script>
+  <script id="18" type="text/x-typescript">
+    const aberrationPanels = display(
+      htl.html`<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;">
+        ${(() => {
+          const phase = panelFigure("sin χ");
+          blit(phase.canvas, applyColormap(sinChi, {colormap: "twilight", vmin: -1, vmax: 1}), gpts[0], gpts[1], {size: panelSize});
+          return phase.node;
+        })()}
+        ${(() => {
+          const quiver = panelFigure("ray displacement");
+          // Canvas 2D cannot resolve `currentColor`, so pick the stroke colour
+          // explicitly. Referencing `dark` makes this cell re-run on a theme change.
+          drawQuiver(quiver.canvas, displacement, gpts[0], gpts[1], {
+            size: panelSize,
+            color: dark ? "#e8eaed" : "#1b1e23"
+          });
+          return quiver.node;
+        })()}
+        ${(() => {
+          const distortion = panelFigure("warped checkerboard");
+          const rgba = applyColormap(warp.warped, {colormap: "gray", vmin: 0, vmax: 1});
+          for (let i = 0; i < warp.inside.length; i++) rgba[i * 4 + 3] = warp.inside[i] ? 255 : 40;
+          blit(distortion.canvas, rgba, gpts[0], gpts[1], {size: panelSize});
+          return distortion.node;
+        })()}
+      </div>`
+    );
+  </script>
+</notebook>

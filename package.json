@@ -1,0 +1,28 @@
+{
+  "name": "@curiousbeams/em-kit",
+  "version": "0.1.0",
+  "description": "Shared client-side primitives for electron-microscopy teaching widgets (Curious Beams Lab, TU Delft).",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/curiousbeams/em-widgets.git"
+  },
+  "main": "./kit/index.js",
+  "exports": {
+    ".": "./kit/index.js",
+    "./*": "./kit/*.js"
+  },
+  "files": [
+    "kit"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "preview": "notebooks preview --root .",
+    "serve": "npx --yes http-server . -p 8080 -c-1"
+  },
+  "devDependencies": {
+    "@observablehq/notebook-kit": "2.5.6"
+  }
+}

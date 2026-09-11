@@ -1,0 +1,134 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Probe Aberrations</title>
+  <script id="1" type="text/markdown">
+    # Aberrations and the electron probe
+
+    A STEM probe is an aperture in the diffraction plane carrying a phase
+    ${tex`e^{-i\chi(\alpha,\phi)}`}; the real-space probe is its Fourier transform.
+    Aberrations live entirely in that phase, so every slider changes the *colour*
+    of the left panel — and the *shape* of the right one.
+
+    Brightness is amplitude and hue is phase, as in the wheel beside each panel.
+
+    *Port of `aberrations_widget` from the IUCr 4D-STEM workshop
+    (`04.electron-wavefunction.ipynb`), which used abtem's `CTF`. The kit is
+    checked against abtem in `test/probe.test.js`.*
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength,
+      complexProbe,
+      ifft2,
+      fftshiftComplex,
+      complexToRGB,
+      phaseWheel,
+      blit,
+      drawScalebar,
+      gridForm
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="3" type="text/x-typescript" pinned="">
+    const gpts = [128, 128]
+  </script>
+  <script id="4" type="text/x-typescript" pinned="">
+    const sampling = [0.125, 0.125]
+  </script>
+  <script id="5" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    // Scattering angle per pixel [mrad], for the Fourier-space scalebar.
+    const angularSamplingMrad = (wavelength / (gpts[0] * sampling[0])) * 1e3
+  </script>
+  <script id="8" type="text/x-typescript">
+    // Units match the workshop's sliders: nm for defocus/astigmatism, μm for coma.
+    const controls = view(
+      gridForm(
+        Inputs.form({
+          semiangle: Inputs.range([5, 50], {value: 20, step: 0.5, label: "semi-angle (mrad)"}),
+          defocus: Inputs.range([-15, 15], {value: 10, step: 0.5, label: "defocus (nm)"}),
+          astigmatism: Inputs.range([0, 10], {value: 5, step: 0.1, label: "astigmatism (nm)"}),
+          astigmatismAngle: Inputs.range([-90, 90], {value: 45, step: 1, label: "astig. angle (°)"}),
+          coma: Inputs.range([0, 2], {value: 0, step: 0.05, label: "coma (μm)"}),
+          comaAngle: Inputs.range([-180, 180], {value: 180, step: 1, label: "coma angle (°)"})
+        })
+      )
+    );
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    // abtem's `defocus` is -C10 — verified against abtem, not assumed.
+    const aberrations = {
+      C10: -controls.defocus * 10,                       // nm -> Å
+      C12: controls.astigmatism * 10,                    // nm -> Å
+      phi12: (controls.astigmatismAngle * Math.PI) / 180,
+      C21: controls.coma * 1e4,                          // μm -> Å
+      phi21: (controls.comaAngle * Math.PI) / 180
+    }
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    // Corner-centered Fourier-space probe, A(k) exp(-i chi(k)).
+    const fourierProbe = complexProbe({
+      gpts,
+      sampling,
+      energy,
+      semiangleCutoff: controls.semiangle,
+      aberrations
+    })
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    // The real-space probe is its inverse transform.
+    const realProbe = ifft2(
+      {re: Float64Array.from(fourierProbe.re), im: Float64Array.from(fourierProbe.im)},
+      gpts[0],
+      gpts[1]
+    )
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    const panelSize = Math.max(200, Math.min(300, Math.floor((width - 90) / 2)))
+  </script>
+  <script id="13" type="text/x-typescript" pinned="">
+    // A domain-coloured panel with a phase wheel and a scalebar, mirroring
+    // py4DSTEM's `Complex2RGB` + `add_colorbar_arg` + `add_scalebar`.
+    const probePanel = (label, array, {extent, units}) => {
+      const canvas = htl.html`<canvas
+        style="width:${panelSize}px;height:${panelSize}px;display:block;border-radius:4px;">`;
+      const ctx = blit(
+        canvas,
+        // vmin/vmax 0..1 matches the workshop's Complex2RGB(vmin=0, vmax=1):
+        // plain min/max normalisation, no quantile clipping.
+        complexToRGB(fftshiftComplex(array, gpts[0], gpts[1]), {vmin: 0, vmax: 1}),
+        gpts[0],
+        gpts[1],
+        {size: panelSize}
+      );
+      drawScalebar(ctx, {extent, units});
+
+      const wheel = htl.html`<canvas width="48" height="48"
+        style="width:48px;height:48px;flex:none;" title="hue = phase, brightness = amplitude">`;
+      wheel.getContext("2d").putImageData(new ImageData(phaseWheel(48), 48, 48), 0, 0);
+
+      return htl.html`<figure style="margin:0;">
+        <div style="display:flex;gap:6px;align-items:center;">${canvas}${wheel}</div>
+        <figcaption style="font-size:12px;text-align:center;margin-top:4px;opacity:0.75;">${label}</figcaption>
+      </figure>`;
+    }
+  </script>
+  <script id="14" type="text/x-typescript">
+    const probePanels = display(
+      htl.html`<div style="display:flex;gap:16px;flex-wrap:wrap;justify-content:center;">
+        ${probePanel("Fourier-space probe", fourierProbe, {
+          extent: gpts[0] * angularSamplingMrad,
+          units: "mrad"
+        })}
+        ${probePanel("real-space probe", realProbe, {
+          extent: gpts[0] * sampling[0],
+          units: "Å"
+        })}
+      </div>`
+    );
+  </script>
+</notebook>

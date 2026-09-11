@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>em-widgets harness</title>
+    <style>
+      :root { color-scheme: light; --page-bg: #ffffff; --page-fg: #1b1e23; }
+      /* Mimic a dark MyST page: the widget inherits the page's background, so
+         the harness has to darken too or light-on-white looks broken here and
+         only here. */
+      :root[data-theme="dark"] { color-scheme: dark; --page-bg: #16181d; --page-fg: #e8eaed; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+        max-width: 900px;
+        margin-inline: auto;
+        background: var(--page-bg);
+        color: var(--page-fg);
+      }
+      header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+      h1 { font-size: 18px; margin: 0; }
+      select, button, input { font: inherit; padding: 4px 8px; }
+      /* Deliberately hostile page styles: anything that leaks into the widget
+         through the shadow boundary will be obvious. */
+      #host { border: 1px dashed color-mix(in srgb, currentColor 30%, transparent); padding: 12px; border-radius: 6px; }
+      .note { opacity: 0.7; font-size: 13px; }
+      code { font-family: ui-monospace, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>em-widgets harness</h1>
+      <select id="notebook">
+        <option value="../notebooks/sem-ray-diagram.html">sem-ray-diagram</option>
+        <option value="../notebooks/geometric-aberrations.html">geometric-aberrations</option>
+        <option value="../notebooks/probe-aberrations.html">probe-aberrations</option>
+        <option value="../notebooks/aperture-autocorrelation.html">aperture-autocorrelation</option>
+        <option value="../notebooks/stem-measurements.html">stem-measurements (zarr data)</option>
+      </select>
+      <label><input type="checkbox" id="dark" /> dark</label>
+      <button id="reload">reload</button>
+    </header>
+
+    <p class="note">
+      Serve this directory over HTTP (<code>npm run serve</code>, then open
+      <code>/test/</code>) — <code>file://</code> will not work, because the
+      widget fetches the notebook and imports ES modules.
+      The widget is mounted in a real open shadow root, exactly as MyST's theme
+      mounts it, so styling behaves the same here as on the site.
+    </p>
+
+    <div id="host"></div>
+
+    <script type="module">
+      import widget from "../observable-notebook.mjs";
+
+      const host = document.getElementById("host");
+      const picker = document.getElementById("notebook");
+      const darkToggle = document.getElementById("dark");
+      let cleanup;
+
+      // The minimal MyST model shim: get / set / on, and nothing else.
+      // `off`, `send` and `save_changes` throw in MyST too, so we omit them
+      // here on purpose — a widget that calls them should fail loudly.
+      function makeModel(values) {
+        const listeners = new Map();
+        return {
+          get: (key) => values[key],
+          set(key, value) {
+            values[key] = value;
+            for (const fn of listeners.get(`change:${key}`) ?? []) fn();
+          },
+          on(event, fn) {
+            listeners.set(event, [...(listeners.get(event) ?? []), fn]);
+          }
+        };
+      }
+
+      async function mount() {
+        await cleanup?.();
+        host.replaceChildren();
+
+        const shadow = host.shadowRoot ?? host.attachShadow({mode: "open"});
+        const el = document.createElement("div");
+        el.style.position = "relative";
+        shadow.replaceChildren(el);
+
+        const model = makeModel({notebook: picker.value});
+        cleanup = await widget.render({model, el});
+      }
+
+      picker.addEventListener("change", mount);
+      document.getElementById("reload").addEventListener("click", mount);
+      darkToggle.addEventListener("change", () => {
+        document.documentElement.classList.toggle("dark", darkToggle.checked);
+        document.documentElement.dataset.theme = darkToggle.checked ? "dark" : "light";
+      });
+
+      mount();
+    </script>
+  </body>
+</html>

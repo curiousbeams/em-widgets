@@ -1,0 +1,203 @@
+<!doctype html>
+<notebook theme="air">
+  <title>SEM Ray Diagram</title>
+  <script id="1" type="text/markdown">
+    # SEM Ray Diagram
+
+    Drag the sliders to change the focal lengths of the condenser and objective
+    lenses, and the radii of the spray and objective apertures. Rays blocked by
+    an aperture stop there.
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {traceRays, semElectroOpticalComponents} from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="9" type="text/x-typescript">
+    const condenser01 = Inputs.range([0.025, 0.5], {
+      value: 0.05,
+      step: 0.005,
+      label: "C1 focal length"
+    });
+    const aperture01 = Inputs.range([0.025, 0.2], {
+      value: 0.05,
+      step: 0.005,
+      label: "spray aperture"
+    });
+    const condenser02 = Inputs.range([0.025, 0.5], {
+      value: 0.15,
+      step: 0.005,
+      label: "C2 focal length"
+    });
+    const aperture02 = Inputs.range([0.025, 0.2], {
+      value: 0.05,
+      step: 0.005,
+      label: "obj aperture"
+    });
+    const objective = Inputs.range([0.025, 0.5], {
+      value: 0.35,
+      step: 0.005,
+      label: "obj focal length"
+    });
+
+    const plotDiv = htl.html`<div></div>`;
+
+    const plotHeight = 550,
+      plotMarginTop = 10,
+      plotMarginBottom = 10;
+    const zStart = 0,
+      zEnd = 1.7;
+    const zToY = (z) =>
+      plotMarginTop +
+      ((z - zStart) / (zEnd - zStart)) *
+        (plotHeight - plotMarginTop - plotMarginBottom);
+
+    const positions = {
+      condenser01: 0.225,
+      aperture01: 0.5125,
+      condenser02: 0.7125,
+      aperture02: 1.2,
+      objective: 1.3
+    };
+
+    const allInputs = [
+      condenser01,
+      aperture01,
+      condenser02,
+      aperture02,
+      objective
+    ];
+    const keys = Object.keys(positions);
+
+    const BREAKPOINT = 550;
+    const wide = width >= BREAKPOINT;
+
+    let form;
+    if (wide) {
+      allInputs.forEach((el, i) => {
+        el.style.position = "absolute";
+        el.style.top = `${zToY(positions[keys[i]]) - 16}px`;
+        el.style.width = "275px";
+      });
+      const inputColumn = htl.html`<div style="position: relative; width: 275px; height: ${plotHeight}px;">
+        ${allInputs}
+      </div>`;
+      form = htl.html`<div style="display: flex; flex-direction: row; align-items: flex-start;">
+        ${inputColumn}${plotDiv}
+      </div>`;
+    } else {
+      const inputColumn = htl.html`<div style="display: flex; flex-direction: column; gap: 4px;">
+        ${allInputs}
+      </div>`;
+      form = htl.html`<div style="display: flex; flex-direction: column; align-items: flex-start;">
+        ${inputColumn}${plotDiv}
+      </div>`;
+    }
+
+    const update = () => {
+      form.value = {
+        condenser01: condenser01.value,
+        aperture01: aperture01.value,
+        condenser02: condenser02.value,
+        aperture02: aperture02.value,
+        objective: objective.value
+      };
+
+      const components = semElectroOpticalComponents(
+        [condenser01.value, condenser02.value, objective.value],
+        [aperture01.value, aperture02.value]
+      );
+      const rays = traceRays(components, 0, 1.7, 0.15, 256);
+      const lines = rays.flatMap((traj, i) =>
+        traj.map(({ z, r }) => ({ z, r, ray: i }))
+      );
+
+      const lensMarks = components
+        .filter((c) => c.type === "lens")
+        .map((c) =>
+          Plot.marks(
+            Plot.ruleY([c.axial_position], {
+              x1: -0.18,
+              x2: 0.18,
+              strokeWidth: 1,
+              strokeOpacity: 0.5
+            }),
+            Plot.line(
+              Array.from({ length: 61 }, (_, i) => {
+                const t = (i / 60) * 2 * Math.PI;
+                return {
+                  x: 0.18 * Math.cos(t),
+                  y: c.axial_position + 0.018 * Math.sin(t)
+                };
+              }),
+              {
+                x: "x",
+                y: "y",
+                strokeWidth: 1.5,
+                fillOpacity: 0.1
+              }
+            )
+          )
+        );
+
+      const apertureMarks = components
+        .filter((c) => c.type === "aperture")
+        .flatMap((c) => [
+          Plot.rect([c], {
+            x1: () => -0.2,
+            x2: (d) => -d.aperture_radius,
+            y1: (d) => d.axial_position - 0.005,
+            y2: (d) => d.axial_position + 0.005,
+            fill: "#aaa"
+          }),
+          Plot.rect([c], {
+            x1: (d) => d.aperture_radius,
+            x2: () => 0.2,
+            y1: (d) => d.axial_position - 0.005,
+            y2: (d) => d.axial_position + 0.005,
+            fill: "#aaa"
+          })
+        ]);
+
+      const sampleMark = Plot.rect(
+        components.filter((c) => c.type === "sample"),
+        {
+          x1: -0.1,
+          x2: 0.1,
+          y1: (d) => d.axial_position - 0.005,
+          y2: (d) => d.axial_position + 0.005
+        }
+      );
+
+      plotDiv.innerHTML = "";
+      plotDiv.append(
+        Plot.plot({
+          width: 275,
+          height: 550,
+          marginLeft: 0,
+          marginRight: 0,
+          marginTop: 0,
+          marginBottom: 0,
+          x: { domain: [-0.25, 0.25], axis: null },
+          y: { domain: [-0.05, 1.75], reverse: true, axis: null },
+          marks: [
+            Plot.line(lines, {
+              x: "r",
+              y: "z",
+              z: "ray",
+              stroke: "rgba(0,140,0,0.35)",
+              strokeWidth: 0.8
+            }),
+            ...lensMarks,
+            ...apertureMarks,
+            sampleMark
+          ]
+        })
+      );
+
+      form.dispatchEvent(new CustomEvent("input", { bubbles: true }));
+    };
+
+    allInputs.forEach((el) => el.addEventListener("input", update));
+    update();
+    const rayDiagram = view(form);
+  </script>
+</notebook>
