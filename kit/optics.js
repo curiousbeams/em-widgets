@@ -1,10 +1,11 @@
 // Electron-optical wave functions: the aberration function, apertures, probes,
 // and Fresnel/multislice propagation.
 //
-// Ported from `aberration_utils.py` (chi, apertures), `ctf/utils.py`,
-// `py4DSTEM.process.phase.utils.ComplexProbe.evaluate_chi`, and the
-// `return_propagator_array` / `propagate_wavefunction` / `multislice_propagation`
-// helpers in `02.stem-measurements-nb.ipynb`.
+// `chi` and the apertures follow `aberration_utils.py`, `ctf/utils.py` and
+// `py4DSTEM.process.phase.utils.ComplexProbe.evaluate_chi`. The propagator and
+// multislice follow **abtem**, checked against it in `test/multislice.test.js` —
+// not `02.stem-measurements-nb.ipynb`, whose propagator carries the opposite
+// sign and would propagate the beam the wrong way here.
 //
 // Angles are in radians unless a name says mrad. Lengths are Angstroms.
 // Grids are corner-centered (fftfreq order) unless stated otherwise.

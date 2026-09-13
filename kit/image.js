@@ -343,20 +343,16 @@ export function binArray(array, nx, ny, factor = 2) {
  * The origin, rather than the centre, is at the probe: a probe from `ifft2` sits
  * at index (0,0), so the two line up with no shifting.
  *
- * **This is an approximation, and not always a small one.** Propagating a probe
- * through a window instead of the full field is cheap — a 64x64 window costs
- * 13x less than a 244x242 field — and it is exact only while the probe's support
- * stays within `size / 2` of the origin. A converged probe looks compact, but a
- * hard aperture gives it Airy tails that fall off as 1/r, and on the torus the
- * window defines those tails wrap back onto the specimen.
+ * **This is an approximation, and not always a small one.** It is exact only
+ * while the probe's support stays within `size / 2` of the origin, and a hard
+ * aperture gives a converged probe Airy tails falling off as 1/r, which wrap
+ * back onto the specimen.
  *
- * Measured on a 22 Å gold particle at 0.2 Å sampling, a 20 mrad probe and 80 kV:
- * a 64-wide window (12.8 Å) **inverted** the sign of the integrated centre of
- * mass, and 96 still did; only at 128 (25.6 Å) did the contrast come out the
- * right way round, and even then the image correlated poorly with the full-field
- * answer. Nothing about the result looks wrong — it is a plausible image of the
- * right object with the contrast reversed. If a widget can afford the full grid,
- * it should use the full grid.
+ * Measured on a 22 Å gold particle at 0.2 Å sampling, 20 mrad, 80 kV: a 64-wide
+ * window (12.8 Å) **inverted** the sign of the integrated centre of mass, and 96
+ * still did. Nothing about the result looks wrong — it is a plausible image of
+ * the right object with the contrast reversed. Prefer the full grid where it
+ * fits.
  */
 export function cropWrap(array, nx, ny, row, col, size) {
   const out = new Float64Array(size * size);

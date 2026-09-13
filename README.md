@@ -18,8 +18,10 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Five widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
-`aperture-autocorrelation`, `probe-aberrations` and `stem-measurements`.
+Six widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+`aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`, and
+`stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
+against abtem to ~1e-6.
 
 ## Adding a widget to a page
 
@@ -94,18 +96,25 @@ duplicated across the lab's Python notebooks.
 | `units.js` | `electronWavelength`, `interactionParameter` |
 | `grid.js` | `fftfreq`, `spatialFrequencies`, `polarCoordinates`, `angularSpatialFrequencies`, `checkerboard` |
 | `fft.js` | `fft2`/`ifft2` (radix-2 + Bluestein, any size), `fftshift`, `fourierShift`, complex helpers |
-| `optics.js` | `chi` to 6th order, `rayDisplacement`, `softAperture`, `complexProbe`, `fresnelPropagator`, `multislice`, `scherzerDefocus` |
-| `image.js` | `histogramScaling`, `radialAverage`, `crossCorrelate`, `gradient2d`, `warpNearest`, `poisson`, `whiteNoiseObject2D` |
+| `optics.js` | `chi` to 6th order, `rayDisplacement`, `softAperture`, `complexProbe`, `fresnelPropagator`, `multislice`, `antialiasAperture`, `scherzerDefocus` |
+| `specimen.js` | `fccCluster`, `amorphousSupport`, `projectedPotential` — the Lobato/Fourier superposition abtem uses |
+| `detectors.js` | `annularMask`, `segmentedDetector`, `centreOfMassFromSegments`, `segmentIndex` |
+| `image.js` | `histogramScaling`, `radialAverage`, `integrateGradient`, `gradient2d`, `warpNearest`, `poisson`, `cropCenter` |
 | `color.js` | `complexToRGB` (inverse CIECAM02), `phaseWheel`, `applyColormap` — magma, gray, twilight, RdBu, PuOr, PiYG, eclipse |
-| `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `gridForm`, `currentColor`, `pointerToIndices` |
+| `scene3d.js` | `makeView`, `project`/`unproject`, `drawSpheres`, `drawPlane`, `drawProbeCone` — canvas 2D, no WebGL |
+| `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `UI` (the lab's palette) |
+| `anim.js` | `frames`, `whenVisible`, `qualityBudget` — generator cells the Observable scheduler drives |
+| `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `currentColor`, `pointerToIndices` |
 | `raytrace.js` | `transferMatrix`, `traceRays`, `semElectroOpticalComponents` |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |
 
 ### Conventions
 
 - Lengths in Angstroms, energies in eV, angles in radians (unless a name says mrad).
-- 2D arrays are flat and row-major, `[ix * ny + iy]` — numpy's `indexing="ij"`,
-  with `ix` the vertical axis, as in `imshow`.
+- 2D arrays are flat and row-major, `[ix * ny + iy]` — numpy's `indexing="ij"`.
+  Whether `ix` is vertical (`imshow`) or horizontal (a scan whose first index runs
+  along the field) is the caller's choice: `toImageData` assumes the first,
+  `transposeToImageData` the second. Picking the wrong one is a silent 90° turn.
 - Complex arrays are `{re, im}` pairs of `Float64Array`s.
 - Reciprocal-space grids are **corner-centered** (fftfreq order). Only `fftshift`
   when you are about to draw.

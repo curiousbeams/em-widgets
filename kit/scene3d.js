@@ -474,7 +474,7 @@ export function drawPlaneBanded(ctx, view, image, x, y, z, half, options = {}) {
 // The probe cone
 // ---------------------------------------------------------------------------
 
-/** Green tokens, matching the reference widgets. */
+/** The beam's green. Widget chrome uses `UI` in `ui.js` instead. */
 export const BEAM = {
   fill: "rgba(0,200,110,0.3)",
   stroke: "#00b863",
@@ -492,9 +492,11 @@ export const BEAM = {
  *   drawSpheres(ctx, view, atoms);
  *   drawProbeCone(ctx, view, {...opts, part: "upper"});   // aperture -> sample
  *
- * The cone's radius is `|z - crossoverZ| * slope`, with the slope fixed by
- * `detectorRadius` at `zDetector`. So moving `crossoverZ` (which should track
- * defocus) moves the waist, and the beam footprint on the specimen follows.
+ * The radius is `|z - crossoverZ| * slope`, with the slope set by
+ * `detectorRadius` at `zDetector`. Moving `crossoverZ` (which should track
+ * defocus) moves the waist, and the footprint on the specimen follows — but the
+ * drawn half-angle drifts with it, since the radius at the detector is what is
+ * held fixed. Keep the defocus range short enough that the drift stays quiet.
  *
  * @param {object} opts
  * @param {number} [opts.x=0] probe position
@@ -535,9 +537,6 @@ export function drawProbeCone(ctx, view, opts) {
 
   const axisAt = axis ?? (() => ({x, y}));
 
-  // The cone is pinned by its radius at the detector, so the beam always lands
-  // on its own bright-field disc. Its half-angle then drifts as the waist moves,
-  // which is why the widgets using this keep their defocus range short.
   const slope = Math.abs(zDetector - crossoverZ) > 1e-9
     ? detectorRadius / Math.abs(zDetector - crossoverZ)
     : 0;

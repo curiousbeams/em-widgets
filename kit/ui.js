@@ -9,8 +9,10 @@
 //             instruments rather than as subplots. Use it for anything with a
 //             column or a beam.
 //
-//   panels()  a row of small labelled canvases. Right for analysis views —
-//             a CTF next to its PSF — where the panels are genuinely separate.
+//   panels()  small labelled canvases, in a row or a grid. Right for analysis
+//             views — a CTF next to its PSF — where the panels are separate.
+//
+// `row()` and `column()` compose the two into a figure.
 //
 // Everything here is plain DOM; no htl, no framework, so the kit stays usable
 // outside Observable too.
@@ -20,13 +22,11 @@
 // ---------------------------------------------------------------------------
 
 /**
- * The lab's colours, taken from the Curious Beams mark: a bright cyan, the
- * deeper blue beneath it, and the navy it sits on.
+ * The lab's colours, from the Curious Beams mark.
  *
- * Chrome — sliders, toggles — uses these, deliberately not the beam's palette in
- * `scene3d.js`. The beam is green because a green cone is how an electron beam
- * is drawn; a widget's controls have no business inheriting that, and while they
- * did, restyling the site meant editing the beam.
+ * Chrome uses these, not `BEAM` in `scene3d.js`. The beam is green because that
+ * is how an electron beam is drawn; while the sliders took their accent from it,
+ * restyling the site meant editing the beam.
  */
 export const UI = {
   accent: "#04a1cd",
@@ -156,16 +156,13 @@ const STYLES = `
 `;
 
 /**
- * Attach the kit stylesheet to a component.
+ * Attach the kit stylesheet to a component, once per component.
  *
- * The style element is appended **inside the component's own node**, not to a
- * root. Resolving a root is not an option here: a cell builds its DOM before
- * Observable attaches it, so `getRootNode()` returns the detached node itself
- * and the styles land in `document.head` — which a shadow root cannot see. A
- * `<style>` anywhere inside a shadow tree applies to the whole tree, and it
- * travels with the node when it is finally attached.
- *
- * Guarded per node, so a component is styled exactly once.
+ * The style element goes *inside* the node and is hoisted to the shadow root on
+ * the next frame. It cannot start there: a cell builds its DOM before Observable
+ * attaches it, so `getRootNode()` returns the detached node and the styles would
+ * land in `document.head`, which a shadow root cannot see. Hoisting afterwards
+ * keeps it out of a button's `textContent` and leaves one stylesheet per widget.
  */
 export function ensureStyles(node) {
   if (!node || styled.has(node)) return;
@@ -174,16 +171,6 @@ export function ensureStyles(node) {
   style.textContent = STYLES;
   node.appendChild(style);
 
-  // Then hoist it out on the next frame, once the component has been attached.
-  //
-  // It has to start inside the node because a cell builds its DOM before
-  // Observable attaches it: at construction `getRootNode()` returns the detached
-  // node itself, so there is no shadow root to put the stylesheet in yet, and
-  // `document.head` is invisible from inside one. Leaving it there works — a
-  // <style> anywhere in a shadow tree styles the whole tree — but it would sit
-  // inside a <button>, where it joins that button's `textContent`. Moving it to
-  // the root afterwards also means one stylesheet per widget instead of one per
-  // component.
   if (typeof requestAnimationFrame !== "function") return;
   requestAnimationFrame(() => {
     const root = node.getRootNode();

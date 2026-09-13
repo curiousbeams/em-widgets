@@ -335,8 +335,8 @@
     })
   </script>
   <script id="30" type="text/x-typescript" pinned="">
-    // One index map for all sixteen segments plus ABF and ADF, so a scan position
-    // costs one pass over the pattern instead of eighteen.
+    // One index map for every segment, so a scan position costs a single pass
+    // over the pattern rather than one per segment.
     const detectorIndex = (() => {
       const n = detector.masks.length;
       return {
@@ -501,9 +501,9 @@
     })
   </script>
   <script id="39" type="text/x-typescript" pinned="">
-    // What sits under the probe right now: the exit wave, and the pattern that
-    // wave makes on the detector. Both square, both cropped to the probe — the
-    // pattern is hard to read edge-on in the 3D scene.
+    // What sits under the probe right now: the exit wave, cropped around it, and
+    // the pattern that wave makes on the detector — which is hard to read
+    // edge-on in the 3D scene.
     const underPanels = (() => {
       const w = Math.floor((sceneWidth - 10) / 2);
       return panels([
@@ -564,7 +564,7 @@
         controlBox.appendChild(form);
       }
       // Specimen and optics share the top row; the instrument spans both, so its
-      // seven controls lay out in two even columns of their own.
+      // own controls lay out in two even columns.
       instrumentForm.style.gridColumn = "1 / -1";
 
       const right = column([signalPanels.node, controlBox], {align: "stretch"});
@@ -685,11 +685,6 @@
         const y = clamp((p.y / geom.halfY / 2 + 0.5) * fov[1], fov[1] - sampling[1]);
         return {row: Math.round(x / sampling[0]), col: Math.round(y / sampling[1])};
       };
-      // `hovering` means "the pointer is over the specimen", not "over the
-      // canvas". The canvas is mostly empty column above and below the field, and
-      // treating that as driving the probe stops the raster while leaving the
-      // probe wherever it happened to be — the widget looks frozen for no reason
-      // the reader can see.
       const handlers = {
         pointerenter: () => (probeState.hovering = true),
         pointerleave: () => (probeState.hovering = false),
@@ -882,19 +877,13 @@
 
       // One straight cone, pinned to the bright-field disc at the detector.
       //
-      // No single cone can be right everywhere: above the specimen the beam is a
-      // real-space cone whose half-angle is the aperture's, while the plane the
-      // pattern is drawn on is the DIFFRACTION plane, where the disc has a radius
-      // set by α alone whatever the defocus. Fixing the half-angle makes the beam
-      // miss its own disc; pinning the disc makes the half-angle drift with
-      // defocus. Splitting the difference — a kink at the exit surface — is the
-      // most obviously wrong of the three, because it puts a change of
-      // convergence angle *after* the cross-over, which no lens does.
-      //
-      // So: keep the disc, accept the drift, and keep the defocus range short
-      // enough that the drift stays quiet. ±15 Å is not much probe broadening —
-      // a 20 mrad probe at 80 kV is already 2.5 Å across — but these signals are
-      // essentially in-focus ones, and showing them soften is the whole ask.
+      // No single cone is right everywhere: above the specimen the beam is a
+      // real-space cone with the aperture's half-angle, while the plane the
+      // pattern is drawn on is the diffraction plane, where the disc's radius is
+      // set by α alone. Fixing the half-angle makes the beam miss its own disc;
+      // kinking it at the exit is worse still, putting a change of convergence
+      // angle after the cross-over, which no lens does. So pin the disc, accept
+      // the drift, and keep the defocus range short enough to hide it.
       const beam = {
         x: probeScene.x, y: probeScene.y,
         zAperture: geom.zAperture, zDetector: geom.zDetector,
@@ -941,9 +930,9 @@
       dp.ctx.clearRect(0, 0, dp.width, dp.height);
       dp.ctx.imageSmoothingEnabled = true;
       dp.ctx.drawImage(dpCanvas.canvas, 0, 0, dp.width, dp.height);
-      // Every detector, drawn over the pattern it collects. Three sliders that
-      // change nothing visible are three sliders nobody touches — and the point
-      // of the widget is that the region you add up decides the image.
+      // The detectors, drawn over the pattern they collect. A slider that changes
+      // nothing visible is a slider nobody touches, and the point of the widget is
+      // that the region you add up decides the image.
       (() => {
         const c = dp.ctx;
         const half = dp.width / 2;
