@@ -32,3 +32,8 @@ export * from "./image.js";
 export * from "./color.js";
 export * from "./canvas.js";
 export * from "./raytrace.js";
+export * from "./scene3d.js";
+export * from "./anim.js";
+export * from "./ui.js";
+export * from "./specimen.js";
+export * from "./detectors.js";

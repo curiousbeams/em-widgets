@@ -45,6 +45,9 @@ def main() -> None:
                    histogram_scaling, au)
     write_colormaps(args.out)
     write_abtem_probe(args.out)
+    write_abtem_potential(args.out)
+    write_abtem_icom(args.out)
+    write_abtem_multislice(args.out)
 
 
 def write_jch(out: str) -> None:
@@ -196,12 +199,154 @@ def write_abtem_probe(out: str) -> None:
     print("wrote", path)
 
 
+def write_abtem_potential(out: str) -> None:
+    """Projected potential from abtem, the reference for kit/specimen.js.
+
+    Deliberately a rectangular cell with unequal gpts: that is what catches a
+    transposed (x, y) vs (row, col) port, which otherwise passes every test.
+    """
+    try:
+        import abtem
+        import ase
+    except ImportError:
+        print("warning: abtem/ase not installed, skipping the potential fixture")
+        return
+
+    Lx, Ly, Lz = 12.0, 10.0, 8.0
+    gpts = (60, 50)
+    symbols = ["Au", "Au", "C", "C", "C"]
+    positions = [[3.0, 2.5, 4.0], [7.4, 6.1, 4.0], [1.1, 8.3, 4.0],
+                 [9.9, 1.7, 4.0], [5.0, 5.0, 4.0]]
+
+    atoms = ase.Atoms(symbols=symbols, positions=positions,
+                      cell=[Lx, Ly, Lz], pbc=[True, True, False])
+    pot = abtem.Potential(atoms, gpts=gpts, slice_thickness=Lz,
+                          parametrization="lobato").build()
+    V = np.asarray(pot.array[0])
+
+    def b64(a):
+        return base64.b64encode(np.ascontiguousarray(a, dtype=np.float32).tobytes()).decode()
+
+    path = os.path.join(out, "abtem-potential.json")
+    with open(path, "w") as f:
+        json.dump({
+            "note": "abtem.Potential, lobato parametrization, projection=infinite, single slice",
+            "cell": [Lx, Ly, Lz], "gpts": list(gpts),
+            "sampling": [float(s) for s in pot.sampling],
+            "symbols": symbols, "positions": positions, "V": b64(V),
+        }, f)
+    print("wrote", path)
+
+
+def write_abtem_icom(out: str) -> None:
+    """Fourier integration of a gradient field — the iCoM step."""
+    try:
+        from abtem.measurements import _integrate_gradient_2d
+    except ImportError:
+        print("warning: abtem not installed, skipping the iCoM fixture")
+        return
+
+    ny, nx = 32, 24
+    sampling = (0.4, 0.3)
+    yy, xx = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+    phase = np.sin(2 * np.pi * xx / nx) * np.cos(2 * np.pi * yy / ny) + 0.3 * np.sin(4 * np.pi * xx / nx)
+    g0, g1 = np.gradient(phase, *sampling)
+    T = _integrate_gradient_2d(g0 + 1j * g1, sampling)
+
+    def b64(a):
+        return base64.b64encode(np.ascontiguousarray(a, dtype=np.float32).tobytes()).decode()
+
+    path = os.path.join(out, "abtem-icom.json")
+    with open(path, "w") as f:
+        json.dump({
+            "note": "abtem _integrate_gradient_2d(g0 + i g1, sampling); gx is the axis-0 gradient",
+            "shape": [ny, nx], "sampling": list(sampling),
+            "gx": b64(g0), "gy": b64(g1), "T": b64(T),
+        }, f)
+    print("wrote", path)
+
+
+def write_abtem_multislice(out: str) -> None:
+    """A full probe -> multislice -> diffraction pattern, the reference for the
+    scanning simulation.
+
+    Everything here is chosen to break a plausible-but-wrong port: the cell is
+    rectangular with unequal gpts, the probe sits at a position that is not on a
+    grid node and not on any symmetry axis, and the potential is deep enough to
+    need several slices. The potential slices are stored too, so a failure can be
+    localised to the propagation rather than the potential.
+    """
+    try:
+        import abtem
+        import ase
+    except ImportError:
+        print("warning: abtem/ase not installed, skipping the multislice fixture")
+        return
+
+    Lx, Ly, Lz = 20.0, 16.0, 12.0
+    gpts = (100, 80)
+    energy, semiangle = 80e3, 20.0
+    slice_thickness = 3.0
+    position = [7.3, 5.1]
+
+    symbols = ["Au", "Au", "C", "C"]
+    positions = [[7.0, 5.0, 2.0], [9.1, 6.4, 5.0],
+                 [12.0, 9.0, 8.0], [3.3, 12.7, 10.5]]
+    atoms = ase.Atoms(symbols=symbols, positions=positions,
+                      cell=[Lx, Ly, Lz], pbc=[True, True, False])
+
+    pot = abtem.Potential(atoms, gpts=gpts, slice_thickness=slice_thickness,
+                          parametrization="lobato").build()
+    V = np.asarray(pot.array)
+
+    scan = abtem.CustomScan(np.array([position]))
+    results = {}
+    for label, defocus in (("focused", 0.0), ("defocused", 60.0)):
+        probe = abtem.Probe(energy=energy, semiangle_cutoff=semiangle,
+                            defocus=defocus).match_grid(pot)
+        entrance = np.asarray(probe.build(scan).array)[0]
+        exit_wave = np.asarray(probe.multislice(pot, scan).array)[0]
+        dp = np.asarray(probe.multislice(pot, scan)
+                        .diffraction_patterns(max_angle=None).array)[0]
+        results[label] = {
+            "defocus": defocus,
+            "entrance_re": b64f(entrance.real), "entrance_im": b64f(entrance.imag),
+            "exit_re": b64f(exit_wave.real), "exit_im": b64f(exit_wave.imag),
+            "dp": b64f(dp),
+        }
+
+    path = os.path.join(out, "abtem-multislice.json")
+    with open(path, "w") as f:
+        json.dump({
+            "note": "abtem.Probe.multislice through a lobato potential; "
+                    "arrays are float32, C order, shape (gpts[0], gpts[1])",
+            "cell": [Lx, Ly, Lz], "gpts": list(gpts),
+            "sampling": [float(v) for v in pot.sampling],
+            "energy": energy, "semiangle": semiangle,
+            "slice_thickness": slice_thickness, "n_slices": int(V.shape[0]),
+            "symbols": symbols, "positions": positions,
+            "position": position,
+            "antialias_cutoff_gpts": [
+                int(v) for v in abtem.Probe(energy=energy, semiangle_cutoff=semiangle)
+                .match_grid(pot).antialias_cutoff_gpts],
+            "V": b64f(V),
+            "cases": results,
+        }, f)
+    print("wrote", path)
+
+
+def b64f(a):
+    return base64.b64encode(np.ascontiguousarray(a, dtype=np.float32).tobytes()).decode()
+
+
 def write_colormaps(out: str) -> None:
     """Rewrite kit/colormap-data.js from matplotlib and cmasher."""
     import matplotlib
 
     names = {"magma": "magma", "twilight": "twilight",
-             "RdBu": "RdBu", "PuOr": "PuOr", "PiYG": "PiYG"}
+             "RdBu": "RdBu", "PuOr": "PuOr", "PiYG": "PiYG",
+             "plasma": "plasma", "inferno": "inferno", "viridis": "viridis",
+             "turbo": "turbo", "hot": "hot"}
     maps = {}
     for js_name, mpl_name in names.items():
         colors = matplotlib.colormaps[mpl_name](np.linspace(0, 1, 256))[:, :3]

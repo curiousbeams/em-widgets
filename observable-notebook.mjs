@@ -10,7 +10,10 @@
 //     notebook: "https://curiousbeams.github.io/em-widgets/notebooks/sem-ray-diagram.html",
 //     cells: ["rayDiagram"],      // optional: cell ids or declared names to display
 //     params: {semiangle: 0.15},  // optional: redefine notebook cells from markdown
-//     hideCode: true              // optional: suppress echo of `pinned` cells (default true)
+//     hideCode: true,             // optional: suppress echo of `pinned` cells (default true)
+//     rewriteImports: {           // optional: map import URL prefixes
+//       "https://curiousbeams.github.io/em-widgets/": "/"
+//     }
 //   }
 //   :::
 //
@@ -171,11 +174,21 @@ function trackTheme(el, notify) {
  * that climbs out of it ("../kit/index.js") cannot be resolved while editing.
  * This hook still matters for files that genuinely sit beside the notebook.
  */
-function makeResolveImport(notebookUrl) {
-  return (specifier) =>
-    /^\.{0,2}\//.test(specifier)
+function makeResolveImport(notebookUrl, rewrites) {
+  return (specifier) => {
+    let resolved = /^\.{0,2}\//.test(specifier)
       ? new URL(specifier, notebookUrl).href
       : resolveImportDefault(specifier);
+    if (rewrites) {
+      for (const [from, to] of Object.entries(rewrites)) {
+        if (resolved.startsWith(from)) {
+          resolved = to + resolved.slice(from.length);
+          break;
+        }
+      }
+    }
+    return resolved;
+  };
 }
 
 /** Should this cell's output be displayed? `show` may hold cell ids or declared names. */
@@ -246,7 +259,15 @@ export default {
 
       const show = model.get("cells") ?? null;
       const hideCode = model.get("hideCode") ?? true;
-      const resolveImport = makeResolveImport(notebookUrl);
+      // `rewriteImports` maps URL prefixes, so a notebook that imports the
+      // published kit by absolute URL can be run against a local checkout
+      // without editing it. The harness sets this automatically on localhost;
+      // it is also how you would pin a notebook to an older kit.
+      const rewrites = model.get("rewriteImports");
+      const resolveImport = makeResolveImport(notebookUrl, rewrites);
+      // Data is fetched at runtime rather than imported, so the kit needs the
+      // same mapping — see `resolveAsset` in kit/data.js.
+      if (rewrites) globalThis.__emWidgetsRewrite = rewrites;
 
       // `width` must observe our own container: notebook-kit's default watches
       // document.querySelector("main"), which is outside the shadow root.

@@ -62,12 +62,13 @@ test("radialAverage matches ctf/utils.py:radially_average_ctf", (t) => {
   assert.ok(worstK < 1e-12 && worstI < 1e-12, `dk ${worstK}, dI ${worstI}`);
 });
 
-test("colormaps decode to 256 RGB triplets", () => {
+test("colormaps decode to 256 RGB triplets", (t) => {
+  t.diagnostic(listColormaps().join(", "));
   for (const name of listColormaps()) {
     const table = colormap(name);
     assert.equal(table.length, 768, `${name} length`);
   }
-  assert.throws(() => colormap("viridis"), /Unknown colormap/);
+  assert.throws(() => colormap("no-such-map"), /Unknown colormap/);
 });
 
 test("applyColormap spans the table and writes opaque RGBA", () => {

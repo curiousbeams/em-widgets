@@ -38,6 +38,7 @@
         <option value="../notebooks/probe-aberrations.html">probe-aberrations</option>
         <option value="../notebooks/aperture-autocorrelation.html">aperture-autocorrelation</option>
         <option value="../notebooks/stem-measurements.html">stem-measurements (zarr data)</option>
+        <option value="../notebooks/stem-experiment.html">stem-experiment (3D scene)</option>
       </select>
       <label><input type="checkbox" id="dark" /> dark</label>
       <button id="reload">reload</button>
@@ -48,7 +49,9 @@
       <code>/test/</code>) — <code>file://</code> will not work, because the
       widget fetches the notebook and imports ES modules.
       The widget is mounted in a real open shadow root, exactly as MyST's theme
-      mounts it, so styling behaves the same here as on the site.
+      mounts it, so styling behaves the same here as on the site. On localhost
+      the published kit URL is rewritten to this checkout, so edits to
+      <code>kit/</code> take effect on reload.
     </p>
 
     <div id="host"></div>
@@ -87,7 +90,15 @@
         el.style.position = "relative";
         shadow.replaceChildren(el);
 
-        const model = makeModel({notebook: picker.value});
+        // Served locally? Then run the notebooks against this checkout rather
+        // than the published kit, so kit edits show up without a push.
+        const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+        const model = makeModel({
+          notebook: picker.value,
+          rewriteImports: local
+            ? {"https://curiousbeams.github.io/em-widgets/": location.origin + "/"}
+            : undefined
+        });
         cleanup = await widget.render({model, el});
       }
 

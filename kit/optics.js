@@ -185,26 +185,90 @@ export function complexProbe({
 }
 
 /**
- * Fresnel free-space propagator for one slice: `exp(i pi lambda dz k^2)`.
+ * The antialiasing aperture abtem applies throughout multislice: a disc at 2/3
+ * of the Nyquist frequency with a short cosine taper.
  *
- * Sign convention taken from `return_propagator_array` in
- * `02.stem-measurements-nb.ipynb`. Multiply into a wavefunction's Fourier
- * transform, then inverse transform.
+ * Multislice convolves the wave with the potential once per slice, and a product
+ * in real space is a convolution in reciprocal space — so each step spreads the
+ * wave's bandwidth and the top third of the grid fills with aliased scattering
+ * that has wrapped around the Nyquist edge. Band-limiting every step is what
+ * keeps that out. It is not a cosmetic filter: without it a four-slice exit wave
+ * is already 5% wrong (measured against abtem in `test/multislice.test.js`).
+ *
+ * Matches `abtem.antialias.antialias_aperture` with its default cutoff of 2/3
+ * and taper of 0.01.
+ *
+ * @param {[number, number]} gpts
+ * @param {[number, number]} sampling [Angstrom]
+ * @returns {Float64Array} 1 inside, tapering to 0 at the cutoff
+ */
+export function antialiasAperture(gpts, sampling, {cutoff = 2 / 3, taper = 0.01} = {}) {
+  const {kx, ky} = spatialFrequencies(gpts, sampling);
+  // abtem measures both against the coarser of the two samplings, so a
+  // rectangular cell gets one circular aperture rather than an ellipse.
+  const coarsest = Math.max(sampling[0], sampling[1]);
+  const kCut = cutoff / (2 * coarsest);
+  const kTaper = taper / coarsest;
+  const out = new Float64Array(kx.length);
+  for (let i = 0; i < kx.length; i++) {
+    const k = Math.hypot(kx[i], ky[i]);
+    if (k > kCut) out[i] = 0;
+    else if (kTaper > 0 && k > kCut - kTaper) {
+      out[i] = 0.5 * (1 + Math.cos((Math.PI * (k - kCut + kTaper)) / kTaper));
+    } else out[i] = 1;
+  }
+  return out;
+}
+
+/**
+ * Band-limit a real-space field by the antialiasing aperture.
+ *
+ * Used on transmission functions before they enter multislice, as abtem does.
+ */
+export function bandlimit({re, im}, gpts, sampling, options) {
+  const [nx, ny] = gpts;
+  const aperture = antialiasAperture(gpts, sampling, options);
+  const F = fft2({re: Float64Array.from(re), im: Float64Array.from(im)}, nx, ny);
+  for (let i = 0; i < F.re.length; i++) {
+    F.re[i] *= aperture[i];
+    F.im[i] *= aperture[i];
+  }
+  return ifft2(F, nx, ny);
+}
+
+/**
+ * Fresnel free-space propagator for one slice: `exp(-i pi lambda dz k^2)`,
+ * band-limited.
+ *
+ * The sign is the one that goes with this kit's forward transform, checked
+ * against abtem's `_fresnel_propagator_array` to 7e-7. Getting it backwards
+ * still produces a plausible-looking defocus series — it just propagates the
+ * wrong way, and a scan built on it inverts its phase contrast.
  *
  * @param {[number, number]} gpts
  * @param {[number, number]} sampling [Angstrom]
  * @param {number} energy [eV]
  * @param {number} dz slice thickness [Angstrom]
+ * @param {object} [options]
+ * @param {boolean} [options.antialias=true] apply the 2/3 aperture, as abtem does
  */
-export function fresnelPropagator(gpts, sampling, energy, dz) {
+export function fresnelPropagator(gpts, sampling, energy, dz, {antialias = true} = {}) {
   const wavelength = electronWavelength(energy);
   const {kx, ky} = spatialFrequencies(gpts, sampling);
-  const prefactor = wavelength * Math.PI * dz;
+  const prefactor = -wavelength * Math.PI * dz;
   const phase = new Float64Array(kx.length);
   for (let i = 0; i < kx.length; i++) {
     phase[i] = (kx[i] * kx[i] + ky[i] * ky[i]) * prefactor;
   }
-  return expi(phase);
+  const out = expi(phase);
+  if (antialias) {
+    const aperture = antialiasAperture(gpts, sampling);
+    for (let i = 0; i < out.re.length; i++) {
+      out.re[i] *= aperture[i];
+      out.im[i] *= aperture[i];
+    }
+  }
+  return out;
 }
 
 /** Propagate a wavefunction one slice through free space. */
@@ -218,25 +282,46 @@ export function propagate(wave, propagator, nx, ny) {
  * Multislice propagation of a wavefunction through a stack of transmission
  * functions.
  *
- * Ported from `multislice_propagation()` in `02.stem-measurements-nb.ipynb`:
- * transmit through each slice, propagate between slices (but not after the last).
+ * Transmit through a slice, then propagate to the next — **including after the
+ * last slice**, so the wave emerges at the exit plane of the cell rather than at
+ * the entrance plane of the final slice. That is abtem's
+ * `conventional_multislice_step`, and it is what makes the exit wave land where
+ * the specimen actually ends.
  *
  * @param {{re: Float64Array, im: Float64Array}} wave real-space entrance wave
- * @param {Array<{re: Float64Array, im: Float64Array}>} transmission per-slice `exp(i sigma V)`
+ * @param {Array<{re: Float64Array, im: Float64Array}>} transmission per-slice
+ *   `exp(i sigma V)`, band-limited — see {@link bandlimit}
  * @param {{re: Float64Array, im: Float64Array}} propagator from {@link fresnelPropagator}
  * @returns {{re: Float64Array, im: Float64Array}} exit wave
  */
 export function multislice(wave, transmission, propagator, nx, ny) {
+  return ifft2(multisliceSpectrum(wave, transmission, propagator, nx, ny), nx, ny);
+}
+
+/**
+ * {@link multislice}, stopping in **Fourier space**.
+ *
+ * The last thing multislice does is transform back to real space, and the first
+ * thing a diffraction measurement does is transform forward again. For a
+ * single-slice specimen that round trip is two of the three transforms in the
+ * whole calculation, so a scanning widget that only wants `|psi(k)|^2` should
+ * ask for the spectrum and stop there.
+ *
+ * The result differs from the true exit spectrum only by the final propagator,
+ * whose magnitude is one everywhere except the antialiasing aperture — which
+ * belongs in the measurement anyway.
+ *
+ * @returns {{re: Float64Array, im: Float64Array}} the exit wave's transform
+ */
+export function multisliceSpectrum(wave, transmission, propagator, nx, ny) {
   // Copy once, then work in place: the propagation step is the hot loop, and a
   // 244 x 242 grid churns ~1 MB per copy.
   const psi = {re: Float64Array.from(wave.re), im: Float64Array.from(wave.im)};
   for (let s = 0; s < transmission.length; s++) {
     multiply(psi, transmission[s], psi);
-    if (s + 1 < transmission.length) {
-      fft2(psi, nx, ny);
-      multiply(psi, propagator, psi);
-      ifft2(psi, nx, ny);
-    }
+    fft2(psi, nx, ny);
+    multiply(psi, propagator, psi);
+    if (s + 1 < transmission.length) ifft2(psi, nx, ny);
   }
   return psi;
 }
@@ -248,8 +333,11 @@ export function multislice(wave, transmission, propagator, nx, ny) {
  * @param {number} [sigma=1] interaction parameter; the lab's cached potentials
  *   are already in radians, so the default leaves them untouched
  */
-export function transmissionFunction(potential, sigma = 1) {
+export function transmissionFunction(potential, sigma = 1, grid = null) {
   const phase = new Float64Array(potential.length);
   for (let i = 0; i < potential.length; i++) phase[i] = potential[i] * sigma;
-  return expi(phase);
+  const t = expi(phase);
+  // abtem band-limits the transmission function before multislice; pass a grid
+  // to do the same. See `antialiasAperture` for why it matters.
+  return grid ? bandlimit(t, grid.gpts, grid.sampling) : t;
 }

@@ -12,6 +12,28 @@
 const ZARRITA = "https://cdn.jsdelivr.net/npm/zarrita@0.7.5/+esm";
 const ZARRITA_ZIP = "https://cdn.jsdelivr.net/npm/@zarrita/storage@0.2.0/dist/src/zip.js/+esm";
 
+/**
+ * Apply the host's URL rewrites to a data URL.
+ *
+ * Notebooks reference data by absolute published URL (Observable Desktop cannot
+ * see anything outside a notebook's own folder). `rewriteImports` on the widget
+ * handles ES imports, but a plain `fetch` needs the same treatment — otherwise a
+ * local checkout silently loads production data, or 404s on data that has not
+ * been published yet.
+ *
+ * Outside the widget the global is unset and this is the identity, so notebooks
+ * using it still work unchanged in Observable Desktop.
+ */
+export function resolveAsset(url) {
+  const rewrites = globalThis.__emWidgetsRewrite;
+  if (rewrites) {
+    for (const [from, to] of Object.entries(rewrites)) {
+      if (String(url).startsWith(from)) return to + String(url).slice(from.length);
+    }
+  }
+  return url;
+}
+
 let modules;
 
 /** Load zarrita once, lazily — widgets that never touch data never pay for it. */
@@ -34,7 +56,7 @@ async function zarrita() {
  */
 export async function openZarrZip(url, path = "data") {
   const {zarr, ZipFileStore} = await zarrita();
-  const store = ZipFileStore.fromUrl(new URL(url, import.meta.url).href);
+  const store = ZipFileStore.fromUrl(new URL(resolveAsset(url), import.meta.url).href);
   return zarr.open.v3(zarr.root(store).resolve(path), {kind: "array"}).catch(() =>
     zarr.open.v2(zarr.root(store).resolve(path), {kind: "array"})
   );

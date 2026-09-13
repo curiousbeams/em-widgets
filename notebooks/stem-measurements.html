@@ -66,8 +66,10 @@
     const sampling = [0.1, 0.1]
   </script>
   <script id="10" type="text/x-typescript" pinned="">
-    // Slice thickness of the simulated slab [Å].
-    const sliceThickness = 2.0
+    // Slice thickness of the simulated slab [Å]. The source notebook uses
+    // dz = 20/7: a 20 Å slab cut into 7 slices, which is also the FCC(111)
+    // interlayer spacing for this lattice (a/√3 = 2.845 Å).
+    const sliceThickness = 20 / 7
   </script>
   <script id="11" type="text/x-typescript" pinned="">
     // Per-slice transmission functions, exp(i V). The cached potentials are

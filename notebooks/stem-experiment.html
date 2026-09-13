@@ -1,0 +1,1095 @@
+<!doctype html>
+<notebook theme="air">
+  <title>A 4D-STEM experiment</title>
+  <script id="1" type="text/markdown">
+    # A 4D-STEM experiment
+
+    Gold nanoparticles on an amorphous carbon film. The probe converges through
+    the specimen and every scattered electron lands somewhere on the detector
+    below — and *which part* of the detector you add up decides what the image
+    shows.
+
+    The scan runs by itself, filling the four signal panels as it goes.
+    **Hover** over the scene to take the probe yourself; **click** to pin it.
+
+    Nothing here is precomputed: the atoms, their projected potential, the exit
+    wave, the diffraction pattern and every detector signal are computed in your
+    browser — the same multislice abtem runs, on the full grid, agreeing with it
+    to one part in a million.
+  </script>
+  <script id="2" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength, interactionParameter,
+      complexProbe, fresnelPropagator, multislice, multisliceSpectrum, bandlimit,
+      fft2, ifft2, fftshift, expi,
+      applyColormap, complexToRGB, histogramScaling,
+      cropCenter, cropCenterComplex, integrateGradient, poisson,
+      angularSpatialFrequencies,
+      fccCluster, amorphousSupport, projectedPotential,
+      annularMask, segmentedDetector, segmentIndex, integrateByIndex,
+      centreOfMassFromSegments,
+      makeView, project, unproject, drawPlaneBanded, drawProbeCone, drawSpheres, ring,
+      scene, panels, row, column, controls as gridControls, toggleButton, badge,
+      collapsible, makeCanvas, transposeToImageData,
+      frames, whenVisible, qualityBudget
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="3" type="text/x-typescript" pinned="">
+    // 48 x 32 A. Small enough that every scan position is a full-grid multislice
+    // — no windowing, so the exit wave and the diffraction pattern are exactly
+    // what abtem would give for this cell.
+    const fov = [48, 32]
+  </script>
+  <script id="4" type="text/x-typescript" pinned="">
+    const sampling = [0.25, 0.25]
+  </script>
+  <script id="5" type="text/x-typescript" pinned="">
+    const gpts = [Math.round(fov[0] / sampling[0]), Math.round(fov[1] / sampling[1])]
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    // Fixed, rather than a slider. The largest angle a grid can represent is
+    // lambda / 2dx, so changing the voltage would slide the whole detector range
+    // out from under the reader: at 300 kV this grid would not reach the ADF
+    // ring at all.
+    const energy = 80e3
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    // Everything past 2/3 of Nyquist is removed by the antialiasing aperture
+    // multislice needs, so this — not the Nyquist angle — is the largest angle
+    // the simulation can honestly report.
+    const maxAngle = (((2 / 3) * wavelength) / (2 * sampling[0])) * 1e3
+  </script>
+
+  <script id="9" type="text/x-typescript" pinned="">
+    // Controls are built as nodes here and read with `Generators.input`, rather
+    // than with `view`, so the layout cell can place them where they belong
+    // instead of leaving them stranded above the figure.
+    //
+    // Each group is two cells: the form, which is what carries the value, and the
+    // collapsible around it, which may also hold a button. Keeping them apart is
+    // what lets `Generators.input` watch the form itself.
+    const specimenFields = gridControls(
+      Inputs.form({
+        diameter: Inputs.range([10, 28], {value: 24, step: 1, label: "particle size (Å)"}),
+        support: Inputs.range([2, 14], {value: 8, step: 1, label: "carbon film (Å)"}),
+        twist: Inputs.range([0, 90], {value: 10, step: 1, label: "orientation (°)"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    const specimenControls = Generators.input(specimenFields)
+  </script>
+  <script id="10b" type="text/x-typescript" pinned="">
+    const specimenForm = collapsible("specimen", specimenFields, true)
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    const opticsFields = gridControls(
+      Inputs.form({
+        defocus: Inputs.range([-15, 15], {value: 0, step: 2.5, label: "defocus (Å)"}),
+        semiangle: Inputs.range([8, 30], {value: 20, step: 1, label: "semi-angle α (mrad)"}),
+        dose: Inputs.select(["∞", "1000000", "100000", "10000", "1000", "100"],
+                            {value: "1000000", label: "dose (e⁻/pattern)"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    const optics = Generators.input(opticsFields)
+  </script>
+  <script id="12b" type="text/x-typescript" pinned="">
+    const opticsForm = collapsible("optics", opticsFields, true)
+  </script>
+  <script id="13" type="text/x-typescript" pinned="">
+    // Detector and scan in one form, because they share a column and because a
+    // change to either invalidates the same thing: every accumulated signal.
+    //
+    // Every radius is in units of the convergence angle, which is how they are
+    // chosen on a microscope — quoting them in mrad would make each one wrong the
+    // moment the semi-angle slider moved.
+    //
+    // There is only one detector geometry. The segments span `from`→`to`,
+    // straddling the bright-field disc edge where a deflected disc moves
+    // intensity out of one sector and into its opposite; their total is the
+    // annular bright-field signal, and the dark field is everything from `to` out
+    // to `ADF outer`. Three numbers, three regions, no overlap.
+    const instrumentFields = gridControls(
+      Inputs.form({
+        inner: Inputs.range([0, 1], {value: 0.5, step: 0.05, label: "segments from (α)"}),
+        outer: Inputs.range([0.6, 2], {value: 1.05, step: 0.05, label: "segments to (α)"}),
+        sectors: Inputs.select([4, 8, 16], {value: 8, label: "sectors"}),
+        rotation: Inputs.range([0, 90], {value: 22.5, step: 2.5, label: "rotation (°)"}),
+        adfOuter: Inputs.range([1.2, 3], {value: 2.8, step: 0.1, label: "ADF outer (α)"}),
+        step: Inputs.range([0.25, 0.75], {value: 0.5, step: 0.25, label: "scan step (Å)"})
+      }),
+      {columns: 2, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="14" type="text/x-typescript" pinned="">
+    const instrument = Generators.input(instrumentFields)
+  </script>
+  <script id="14a" type="text/x-typescript" pinned="">
+    // Outside the form, so it can share a line with the two buttons — which
+    // means it must not behave like a form either: `controls` lays its grid out
+    // across the full width, and a full-width toggle pushes the buttons onto a
+    // line of their own.
+    const multisliceToggle = (() => {
+      const input = Inputs.toggle({value: false, label: "multislice"});
+      const box = document.createElement("div");
+      box.className = "em-controls em-controls--compact em-controls--inline";
+      box.appendChild(input);
+      // `collapsible` and `Generators.input` both read `.value`, and a wrapper
+      // div has none of its own.
+      Object.defineProperty(box, "value", {get: () => input.value, configurable: true});
+      return box;
+    })()
+  </script>
+  <script id="14c" type="text/x-typescript" pinned="">
+    const multisliceOn = Generators.input(multisliceToggle)
+  </script>
+  <script id="14b" type="text/x-typescript" pinned="">
+    const instrumentForm = collapsible("detector & scan", (() => {
+      const box = document.createElement("div");
+      const line = row([multisliceToggle, scanButton, clearButton], {gap: 10, align: "center"});
+      line.style.marginTop = "4px";
+      line.style.justifyContent = "flex-start";
+      box.append(instrumentFields, line);
+      return box;
+    })(), true)
+  </script>
+  <script id="17" type="text/x-typescript" pinned="">
+    const scanButton = toggleButton({on: "■ pause scan", off: "▶ scan", value: true})
+  </script>
+  <script id="18" type="text/x-typescript" pinned="">
+    const scanning = Generators.input(scanButton)
+  </script>
+  <script id="19" type="text/x-typescript" pinned="">
+    const clearButton = (() => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "em-toggle";
+      const label = document.createElement("span");
+      label.textContent = "clear signals";
+      button.appendChild(label);
+      let n = 0;
+      Object.defineProperty(button, "value", {get: () => n, configurable: true});
+      button.addEventListener("click", () => {
+        n += 1;
+        button.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+      });
+      return button;
+    })()
+  </script>
+  <script id="20" type="text/x-typescript" pinned="">
+    const clearCount = Generators.input(clearButton)
+  </script>
+
+  <script id="21" type="text/x-typescript" pinned="">
+    // Two gold particles at different orientations — one with a ⟨111⟩ zone axis
+    // along the beam, one not — so the scan shows orientation contrast, pressed
+    // into an amorphous carbon film.
+    const specimen = (() => {
+      const d = specimenControls.diameter;
+      const t = specimenControls.support;
+      const twist = (specimenControls.twist * Math.PI) / 180;
+      const seed = 10;
+
+      // The film occupies z ∈ [-t, 0], and each particle is truncated by its top
+      // face — a Winterbottom construction: the equilibrium shape of a crystal on
+      // a substrate is its Wulff polyhedron cut off at the interface, with the
+      // depth of the cut set by the adhesion energy. Here that depth is a fixed
+      // fraction of the particle's height.
+      //
+      // Truncating the GOLD, rather than hollowing out the film, is what keeps
+      // the projected potential honest: no gold and carbon ever occupy the same
+      // place, so nothing is counted twice.
+      const wetting = 0.3;
+      const onSubstrate = (atoms) => {
+        let lowest = Infinity, highest = -Infinity;
+        for (const p of atoms) {
+          if (p[2] < lowest) lowest = p[2];
+          if (p[2] > highest) highest = p[2];
+        }
+        const drop = lowest + wetting * (highest - lowest);
+        return atoms
+          .map((p) => [p[0], p[1], p[2] - drop])
+          .filter((p) => p[2] >= 0);
+      };
+
+      const gold = [
+        ...onSubstrate(fccCluster({diameter: d, zoneAxis: [1, 1, 1], twist,
+                                   centre: [fov[0] * 0.27, fov[1] * 0.56, 0]})),
+        ...onSubstrate(fccCluster({diameter: d * 0.7, twist: -twist * 0.7,
+                                   centre: [fov[0] * 0.75, fov[1] * 0.34, 0]}))
+      ];
+      const carbon = amorphousSupport({extent: fov, thickness: t, z: -t / 2, seed});
+
+      // The beam arrives from +z, so the entrance surface is the highest atom.
+      let entrance = -Infinity, exit = Infinity;
+      for (const p of [...gold, ...carbon]) {
+        if (p[2] > entrance) entrance = p[2];
+        if (p[2] < exit) exit = p[2];
+      }
+      return {gold, carbon, entrance, exit, thickness: entrance - exit};
+    })()
+  </script>
+  <script id="21b" type="text/x-typescript" pinned="">
+    // Film beyond the simulated cell, for the 3D view only. Without it the
+    // specimen ends in mid-air at the edge of the field, which reads as a small
+    // chip of carbon rather than as a film the probe is scanning a patch of.
+    // These atoms are never given to `projectedPotential` — the simulation stays
+    // exactly the 48 x 32 Å cell the scan covers.
+    const carbonSurround = (() => {
+      const t = specimenControls.support;
+      const pad = fov[0] * 0.7;
+      // Extended in x only. Widening it in y too would push atoms outside the
+      // depth range the camera was fitted to, and they project as a thicker,
+      // wavier band than the film inside the cell — the join then shows.
+      const wide = amorphousSupport({
+        extent: [fov[0] + 2 * pad, fov[1]],
+        thickness: t, z: -t / 2, seed: 27,
+        origin: [-pad, 0]
+      });
+      return wide.filter((p) => p[0] < 0 || p[0] > fov[0]);
+    })()
+  </script>
+  <script id="22" type="text/x-typescript" pinned="">
+    // Multislice cuts the specimen into slabs of about this thickness, so the
+    // slice count follows the specimen instead of being a number the reader has
+    // to pick. A thin film needs two slices; a tall particle needs several.
+    const nSlices = multisliceOn
+      ? Math.max(2, Math.round(specimen.thickness / 4))
+      : 1
+  </script>
+  <script id="23" type="text/x-typescript" pinned="">
+    // Projected potential per slice — the Lobato/Fourier superposition abtem
+    // uses, with the atoms binned by depth first. One FFT pair per element per
+    // slice, a few milliseconds in all, and only when the specimen changes.
+    //
+    // Binning the real atoms is the difference between multislice and simply
+    // dividing one projected potential into equal shares: the latter propagates
+    // between slices that are all identical, which cannot produce any depth
+    // information at all.
+    const potential = (() => {
+      const {entrance, exit} = specimen;
+      const dz = Math.max(1e-6, (entrance - exit) / nSlices);
+      // Slice 0 is the entrance slice: the beam arrives from +z.
+      const sliceOf = (p) =>
+        Math.min(nSlices - 1, Math.max(0, Math.floor((entrance - p[2]) / dz)));
+      const inSlice = (atoms, s) =>
+        atoms.filter((p) => sliceOf(p) === s).map((p) => [p[0], p[1]]);
+      return Array.from({length: nSlices}, (_, s) => projectedPotential(
+        [
+          {symbol: "Au", positions: inSlice(specimen.gold, s)},
+          {symbol: "C", positions: inSlice(specimen.carbon, s)}
+        ],
+        {gpts, sampling}
+      ));
+    })()
+  </script>
+  <script id="24" type="text/x-typescript" pinned="">
+    const doseValue = optics.dose === "∞" ? Infinity : Number(optics.dose)
+  </script>
+  <script id="25" type="text/x-typescript" pinned="">
+    // One transmission function per slice. Band-limited, because multislice
+    // aliases badly without it — see `antialiasAperture` in the kit.
+    const transmission = (() => {
+      const sigma = interactionParameter(energy);
+      return potential.map((V) => {
+        const phase = new Float64Array(V.length);
+        for (let i = 0; i < V.length; i++) phase[i] = V[i] * sigma;
+        return bandlimit(expi(phase), gpts, sampling);
+      });
+    })()
+  </script>
+  <script id="26" type="text/x-typescript" pinned="">
+    const propagator = fresnelPropagator(
+      gpts, sampling, energy, specimen.thickness / nSlices
+    )
+  </script>
+  <script id="27" type="text/x-typescript" pinned="">
+    const angular = angularSpatialFrequencies(gpts, sampling, wavelength)
+  </script>
+  <script id="28" type="text/x-typescript" pinned="">
+    // Detector radii in mrad, clamped to the angle the grid can represent.
+    const angles = (() => {
+      const a = optics.semiangle;
+      const cap = (v) => Math.min(maxAngle, v * a);
+      return {
+        alpha: a,
+        inner: cap(instrument.inner),
+        outer: cap(instrument.outer),
+        adfOuter: cap(instrument.adfOuter)
+      };
+    })()
+  </script>
+  <script id="29" type="text/x-typescript" pinned="">
+    const detector = segmentedDetector(angular, {
+      inner: angles.inner,
+      outer: angles.outer,
+      sectors: instrument.sectors,
+      rotation: (instrument.rotation * Math.PI) / 180
+    })
+  </script>
+  <script id="30" type="text/x-typescript" pinned="">
+    // One index map for all sixteen segments plus ABF and ADF, so a scan position
+    // costs one pass over the pattern instead of eighteen.
+    const detectorIndex = (() => {
+      const n = detector.masks.length;
+      return {
+        segments: segmentIndex(detector.masks, angular.alpha.length),
+        adf: annularMask(angular, angles.outer, angles.adfOuter),
+        n,
+        sums: new Float64Array(n)
+      };
+    })()
+  </script>
+  <script id="31" type="text/x-typescript" pinned="">
+    // Zero defocus puts the waist at the MIDDLE of the specimen, which is where
+    // a microscopist focuses. Multislice necessarily builds the probe at the
+    // entrance plane, so the aberration carries the extra half-thickness.
+    //
+    // The waist sits `-C10` downstream of the plane the probe was built on —
+    // measured, and asserted in `test/multislice.test.js`, because this sign
+    // flipped when the propagator's did and nothing about the picture said so.
+    const focusOffset = specimen.thickness / 2
+  </script>
+  <script id="31b" type="text/x-typescript" pinned="">
+    // The probe sits at index (0, 0), so moving to a scan position is a plain
+    // index shift — no phase ramp, no extra transform.
+    const probe = ifft2(
+      complexProbe({
+        gpts, sampling, energy,
+        semiangleCutoff: optics.semiangle,
+        aberrations: {C10: -(optics.defocus + focusOffset)}
+      }),
+      gpts[0], gpts[1]
+    )
+  </script>
+  <script id="32" type="text/x-typescript" pinned="">
+    // One scan position: shift the probe, propagate, collect every detector.
+    //
+    // The probe moves by reading it at a rolled index rather than by a Fourier
+    // phase ramp. That is exact whenever the step is a whole number of pixels
+    // (`scan` enforces that) and it saves an FFT per position.
+    const measureAt = (atRow, atCol, {keepExit = false} = {}) => {
+      const [nx, ny] = gpts;
+      const psi = {re: new Float64Array(nx * ny), im: new Float64Array(nx * ny)};
+      // Each row of the shifted probe is two contiguous runs of a row of the
+      // unshifted one, so `set` moves them wholesale. Indexing pixel by pixel
+      // costs two modulo operations per pixel, which on a 192x128 grid is fifty
+      // thousand of them per scan position.
+      const rot = (((atCol % ny) + ny) % ny);
+      for (let i = 0; i < nx; i++) {
+        const si = (((i - atRow) % nx) + nx) % nx;
+        const from = si * ny, to = i * ny;
+        for (const a of [probe.re, probe.im]) {
+          const out = a === probe.re ? psi.re : psi.im;
+          out.set(a.subarray(from, from + ny - rot), to + rot);
+          out.set(a.subarray(from + ny - rot, from + ny), to);
+        }
+      }
+
+      // Stop in Fourier space: that is where the detector lives, and for a
+      // single slice the round trip back to real space and forward again is two
+      // of the three transforms in the whole calculation. The exit wave itself
+      // is only wanted for the one position on display.
+      const spectrum = multisliceSpectrum(psi, transmission, propagator, nx, ny);
+      const exit = keepExit
+        ? ifft2({re: Float64Array.from(spectrum.re), im: Float64Array.from(spectrum.im)}, nx, ny)
+        : null;
+
+      // |psi|^2 directly: `abs` then squaring would take a square root per pixel
+      // and immediately undo it, twenty-five thousand times per scan position.
+      const I = new Float64Array(nx * ny);
+      let total = 0;
+      for (let i = 0; i < I.length; i++) {
+        I[i] = spectrum.re[i] * spectrum.re[i] + spectrum.im[i] * spectrum.im[i];
+        total += I[i];
+      }
+
+      // Shot noise, in electrons per diffraction pattern.
+      if (Number.isFinite(doseValue) && total > 0) {
+        const perElectron = doseValue / total;
+        let noisy = 0;
+        for (let i = 0; i < I.length; i++) { I[i] = poisson(I[i] * perElectron); noisy += I[i]; }
+        total = noisy;
+      }
+      const norm = total || 1;
+
+      let adf = 0;
+      for (let i = 0; i < I.length; i++) adf += I[i] * detectorIndex.adf[i];
+
+      const sums = integrateByIndex(I, detectorIndex.segments, detectorIndex.n,
+                                    detectorIndex.sums);
+      // Annular bright field is the segmented detector's own total — the same
+      // electrons the centre of mass is computed from, just not resolved by
+      // sector. One pass over the pattern now serves both.
+      let abf = 0;
+      for (let i = 0; i < sums.length; i++) abf += sums[i];
+      // Normalised by the WHOLE pattern, not by the segments alone, so the
+      // signal also carries how much intensity reached the detector — the
+      // convention `08_segmented-icom` uses.
+      const com = centreOfMassFromSegments(sums, detector.centroids, norm);
+      return {
+        abf: abf / norm, adf: adf / norm,
+        comX: com.kx, comY: com.ky,
+        intensity: I,
+        exit
+      };
+    }
+  </script>
+  <script id="33" type="text/x-typescript" pinned="">
+    // Everything that invalidates a signal is a dependency, so the buffers clear
+    // themselves when any of it changes — and `clearCount` forces the same.
+    const scan = (() => {
+      optics; instrument; specimenControls; clearCount; nSlices;
+      // A whole number of pixels per step, so shifting the probe by an index is
+      // exact rather than interpolated.
+      const stride = Math.max(1, Math.round(instrument.step / sampling[0]));
+      const nx = Math.floor(gpts[0] / stride);
+      const ny = Math.floor(gpts[1] / stride);
+      return {
+        stride, nx, ny, cursor: 0, count: 0,
+        paintedRows: -1, paintedAt: 0,
+        step: [stride * sampling[0], stride * sampling[1]],
+        abf: new Float64Array(nx * ny),
+        adf: new Float64Array(nx * ny),
+        comX: new Float64Array(nx * ny),
+        comY: new Float64Array(nx * ny),
+        seen: new Uint8Array(nx * ny)
+      };
+    })()
+  </script>
+  <script id="34" type="text/x-typescript" pinned="">
+    // One measurement per probe position, kept until something invalidates it.
+    //
+    // Without this the displayed pattern is re-simulated 30 times a second even
+    // when nothing moves, and at a finite dose every frame draws fresh Poisson
+    // samples — the pattern boils. Depending on `measureAt` is what makes the
+    // cache correct: the cell, and the cache with it, is rebuilt whenever the
+    // optics, the detector or the specimen change.
+    const displayCache = (() => { measureAt; return {key: null, value: null}; })()
+  </script>
+  <script id="35" type="text/x-typescript" pinned="">
+    // One scratch canvas per scan grid, rather than four per frame.
+    const scanCanvas = makeCanvas(scan.nx, scan.ny, {dpr: 1})
+  </script>
+  <script id="35b" type="text/x-typescript" pinned="">
+    // The rendered image for each signal panel, held at panel resolution.
+    //
+    // The images are only redrawn when a scan row completes, but the probe marker
+    // has to move every frame — so the panel is composed each frame from a stored
+    // layer plus the marker, rather than being re-colormapped just to move a dot.
+    const panelLayers = signalPanels.panels.map((p) => makeCanvas(p.width, p.height, {dpr: 1}))
+  </script>
+  <script id="36" type="text/x-typescript" pinned="">
+    const budget = qualityBudget({min: 1, max: 32, slowMs: 14, fastMs: 9})
+  </script>
+
+  <script id="37" type="text/x-typescript" pinned="">
+    const sceneWidth = Math.round(Math.max(300, Math.min(400, (width - 30) * 0.42)))
+  </script>
+  <script id="38" type="text/x-typescript" pinned="">
+    const stage = scene({
+      width: sceneWidth,
+      height: 360,
+      hint: "hover to drive the probe · click to pin it"
+    })
+  </script>
+  <script id="39" type="text/x-typescript" pinned="">
+    // What sits under the probe right now: the exit wave, and the pattern that
+    // wave makes on the detector. Both square, both cropped to the probe — the
+    // pattern is hard to read edge-on in the 3D scene.
+    const underPanels = (() => {
+      const w = Math.floor((sceneWidth - 10) / 2);
+      return panels([
+        {label: "exit wave", width: w, height: w},
+        {label: "diffraction pattern", width: w, height: w}
+      ]);
+    })()
+  </script>
+  <script id="40" type="text/x-typescript" pinned="">
+    const panelWidth = Math.round(
+      Math.max(150, Math.min(215, (width - sceneWidth - 36) / 2))
+    )
+  </script>
+  <script id="40b" type="text/x-typescript" pinned="">
+    // The four images the scan forms, two by two, in the field's own 3:2 aspect.
+    const signalPanels = (() => {
+      const w = panelWidth;
+      const h = Math.round((w * fov[1]) / fov[0]);
+      return panels([
+        {label: "ABF", width: w, height: h},
+        {label: "ADF", width: w, height: h},
+        {label: "CoM", width: w, height: h},
+        {label: "iCoM", width: w, height: h}
+      ], {columns: 2, inset: true});
+    })()
+  </script>
+  <script id="41" type="text/x-typescript" pinned="">
+    const readout = badge()
+  </script>
+  <script id="41b" type="text/x-typescript" pinned="">
+    // One colour per detector, used on the diffraction panel and on the detector
+    // plane in the 3D scene, so the two read as the same object.
+    const DETECTOR = {
+      abf: "rgba(150,185,255,0.95)", abfFill: "rgba(150,185,255,0.16)",
+      adf: "rgba(255,165,75,0.95)", adfFill: "rgba(255,165,75,0.14)",
+      segments: "rgba(120,255,190,0.9)", segmentFill: "rgba(120,255,190,0.12)",
+      com: "rgba(255,255,255,0.95)"
+    }
+  </script>
+  <script id="42" type="text/x-typescript" pinned="">
+    // Built once. A layout rebuilt inside the animation loop re-parents the
+    // canvases thirty times a second, and a re-parented element never receives
+    // its `pointerleave` — the widget then believes the pointer is still on it
+    // and refuses to resume scanning.
+    const layout = (() => {
+      const left = column([stage.node, underPanels.node]);
+      const controlBox = document.createElement("div");
+      controlBox.style.display = "grid";
+      // `minmax(0, 1fr)`, not `1fr`: a plain `1fr` track refuses to shrink below
+      // its content's minimum width, and a slider labelled "semi-angle α (mrad)"
+      // has a wide minimum. The tracks then grow past the column and the whole
+      // figure is dragged out of shape.
+      controlBox.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
+      controlBox.style.columnGap = "14px";
+      controlBox.style.width = "100%";
+      for (const form of [specimenForm, opticsForm, instrumentForm]) {
+        form.style.minWidth = "0";
+        controlBox.appendChild(form);
+      }
+      // Specimen and optics share the top row; the instrument spans both, so its
+      // seven controls lay out in two even columns of their own.
+      instrumentForm.style.gridColumn = "1 / -1";
+
+      const right = column([signalPanels.node, controlBox], {align: "stretch"});
+
+      // Explicit widths, and no growing. Left to itself the row measures its
+      // children, and a control block that wants a few pixels more than it can
+      // have pushes the whole figure over the wrapping point — the panels then
+      // drop below the scene and the layout reads as one long column.
+      left.style.flex = right.style.flex = "0 0 auto";
+      left.style.width = `${sceneWidth}px`;
+      right.style.width = `${2 * panelWidth + 10}px`;
+      return row([left, right]);
+    })()
+  </script>
+
+  <script id="43" type="text/x-typescript" pinned="">
+    // One scale for all three axes. An anisotropic z looks tidier for a flat slab
+    // but turns a nanoparticle into a mound, which is the opposite of the point.
+    const geom = (() => {
+      const scale = 16 / fov[0];
+      const halfX = (fov[0] * scale) / 2;
+      const halfY = (fov[1] * scale) / 2;
+      const entrance = specimen.entrance * scale;
+      const exit = specimen.exit * scale;
+      return {
+        scale, halfX, halfY, entrance, exit,
+        detectorHalf: halfY * 0.92,
+        // A long drop to the detector and a short rise to the aperture. The cone
+        // is pinned to its disc at the detector, so its drawn half-angle drifts
+        // as the waist moves — and the drift is the ratio of that lever arm to
+        // how far the waist travels. Lengthening the arm and drawing less of the
+        // cone above the specimen keeps the drift quiet without shrinking the
+        // specimen much.
+        zAperture: entrance + 7,
+        zDetector: exit - 18
+      };
+    })()
+  </script>
+  <script id="44" type="text/x-typescript" pinned="">
+    const camera = (() => {
+      const fl = 150, elevation = -24, margin = 14;
+      const trial = makeView(0, elevation, 1, 0, 0, fl);
+      const xs = [], ys = [];
+      for (const [z, hx, hy] of [
+        [geom.zAperture, geom.halfX * 0.4, geom.halfY * 0.4],
+        [geom.entrance, geom.halfX, geom.halfY],
+        [geom.exit, geom.halfX, geom.halfY],
+        [geom.zDetector, geom.detectorHalf, geom.detectorHalf]
+      ]) {
+        for (const x of [-hx, hx]) for (const y of [-hy, hy]) {
+          const p = project(x, y, z, trial);
+          xs.push(p.sx); ys.push(p.sy);
+        }
+      }
+      const x0 = Math.min(...xs), x1 = Math.max(...xs);
+      const y0 = Math.min(...ys), y1 = Math.max(...ys);
+      const zoom = Math.min((stage.width - 2 * margin) / (x1 - x0),
+                            (stage.height - 2 * margin) / (y1 - y0));
+      return makeView(0, elevation, zoom,
+        stage.width / 2 - ((x0 + x1) / 2) * zoom,
+        stage.height / 2 - ((y0 + y1) / 2) * zoom, fl);
+    })()
+  </script>
+  <script id="45" type="text/x-typescript" pinned="">
+    const toScene = (x, y) => ({
+      x: (x / fov[0] - 0.5) * 2 * geom.halfX,
+      y: (y / fov[1] - 0.5) * 2 * geom.halfY
+    })
+  </script>
+  <script id="46" type="text/x-typescript" pinned="">
+    // The specimen does not move while scanning, so draw it once to an offscreen
+    // layer and blit that each frame. Thousands of gradient-filled spheres per
+    // frame would otherwise dominate everything else.
+    const specimenLayer = (() => {
+      const layer = makeCanvas(stage.width, stage.height);
+      // Not the atomic radii. Gold is drawn well under its 1.44 Å so the facets
+      // and the {111} layers stay separable; carbon is drawn near its full
+      // 0.77 Å so the film reads as a continuous membrane rather than dust.
+      const atoms = [
+        ...carbonSurround.map((p) => {
+          const c = toScene(p[0], p[1]);
+          return {x: c.x, y: c.y, z: p[2] * geom.scale,
+                  color: [104, 110, 122], radius: 0.77 * geom.scale * 0.95};
+        }),
+        ...specimen.carbon.map((p) => {
+          const s = toScene(p[0], p[1]);
+          return {x: s.x, y: s.y, z: p[2] * geom.scale,
+                  color: [116, 122, 134], radius: 0.77 * geom.scale * 0.95};
+        }),
+        ...specimen.gold.map((p) => {
+          const s = toScene(p[0], p[1]);
+          return {x: s.x, y: s.y, z: p[2] * geom.scale, color: [242, 193, 78]};
+        })
+      ];
+      drawSpheres(layer.ctx, camera, atoms,
+                  {radius: 1.44 * geom.scale * 0.34, fadeFar: 0.45});
+      return layer;
+    })()
+  </script>
+  <script id="47" type="text/x-typescript" pinned="">
+    const probeState = {
+      row: Math.round(gpts[0] / 2), col: Math.round(gpts[1] / 2),
+      pinned: false, hovering: false
+    }
+  </script>
+  <script id="48" type="text/x-typescript" pinned="">
+    const pointerRig = (() => {
+      // Clamped to the field rather than rejected outside it. Seen at this
+      // elevation the specimen plane is nearly edge-on and covers barely a tenth
+      // of the canvas, so requiring the pointer to land on it would make driving
+      // the probe a game of aim; this way anywhere in the column drives it to the
+      // nearest point on the specimen.
+      const clamp = (v, hi) => Math.min(hi, Math.max(0, v));
+      const toField = (event) => {
+        const rect = stage.canvas.getBoundingClientRect();
+        const p = unproject(event.clientX - rect.left, event.clientY - rect.top, camera);
+        const x = clamp((p.x / geom.halfX / 2 + 0.5) * fov[0], fov[0] - sampling[0]);
+        const y = clamp((p.y / geom.halfY / 2 + 0.5) * fov[1], fov[1] - sampling[1]);
+        return {row: Math.round(x / sampling[0]), col: Math.round(y / sampling[1])};
+      };
+      // `hovering` means "the pointer is over the specimen", not "over the
+      // canvas". The canvas is mostly empty column above and below the field, and
+      // treating that as driving the probe stops the raster while leaving the
+      // probe wherever it happened to be — the widget looks frozen for no reason
+      // the reader can see.
+      const handlers = {
+        pointerenter: () => (probeState.hovering = true),
+        pointerleave: () => (probeState.hovering = false),
+        pointermove: (event) => {
+          probeState.hovering = true;
+          if (probeState.pinned) return;
+          const hit = toField(event);
+          probeState.row = hit.row; probeState.col = hit.col;
+        },
+        click: (event) => {
+          const hit = toField(event);
+          probeState.pinned = !probeState.pinned;
+          probeState.row = hit.row; probeState.col = hit.col;
+        }
+      };
+      for (const [type, handler] of Object.entries(handlers)) {
+        stage.canvas.addEventListener(type, handler);
+      }
+
+      // Take them off again when this cell is re-evaluated. It depends on the
+      // camera, which depends on the specimen, so any specimen change re-runs it
+      // — onto the same canvas. Without this the listeners accumulate, and a
+      // second click handler silently undoes the first: clicking toggles `pinned`
+      // twice and nothing appears to happen at all.
+      invalidation.then(() => {
+        for (const [type, handler] of Object.entries(handlers)) {
+          stage.canvas.removeEventListener(type, handler);
+        }
+      });
+      return stage.canvas;
+    })()
+  </script>
+  <script id="49" type="text/x-typescript" pinned="">
+    const visible = whenVisible(stage.canvas)
+  </script>
+  <script id="50" type="text/x-typescript" pinned="">
+    const tick = frames({fps: 30, playing: visible})
+  </script>
+  <script id="51" type="text/x-typescript" pinned="">
+    // 24 A of exit wave around the probe.
+    const cropWidth = Math.min(gpts[0], gpts[1], 2 * Math.round(12 / sampling[0]))
+  </script>
+  <script id="52" type="text/x-typescript" pinned="">
+    // The pattern out to the antialiasing limit, which is as far as it is real.
+    //
+    // Cropped to an equal *angle* on both axes, not an equal number of pixels.
+    // The reciprocal sampling is 1/(N dx), which differs between the axes of a
+    // rectangular grid — here by 3:2 — so an equal pixel crop would draw the
+    // bright-field disc as an ellipse.
+    const patternGpts = (() => {
+      const kMax = (2 / 3) / (2 * Math.max(sampling[0], sampling[1]));
+      return [
+        Math.min(gpts[0], 2 * Math.round(kMax * gpts[0] * sampling[0])),
+        Math.min(gpts[1], 2 * Math.round(kMax * gpts[1] * sampling[1]))
+      ];
+    })()
+  </script>
+  <script id="53" type="text/x-typescript" pinned="">
+    const dpCanvas = makeCanvas(patternGpts[0], patternGpts[1], {dpr: 1})
+  </script>
+  <script id="54" type="text/x-typescript" pinned="">
+    const exitCanvas = makeCanvas(cropWidth, cropWidth, {dpr: 1}).canvas
+  </script>
+
+  <script id="55" type="text/x-typescript" pinned="">
+    // The animation loop. Pinned, so it never displays anything: it only draws
+    // into canvases the layout above already owns.
+    const frame = (() => {
+      tick;
+      const started = performance.now();
+      const {ctx, width: W, height: H} = stage;
+      const [nx, ny] = gpts;
+
+      // --- scan a batch ---------------------------------------------------
+      // Hovering hands the probe to the reader, which pauses the raster.
+      const cells = scan.nx * scan.ny;
+      const complete = scan.count >= cells;
+      // A finished raster keeps its picture rather than looping over it forever,
+      // re-measuring positions it has already measured.
+      const rastering = scanning && !complete && !probeState.hovering && !probeState.pinned;
+      let batch = 0;
+      if (rastering) {
+        const scanStarted = performance.now();
+        batch = budget.value;
+        for (let b = 0; b < batch; b++) {
+          const at = (scan.cursor + b) % cells;
+          const sr = Math.floor(at / scan.ny);
+          const sc = at % scan.ny;
+          const serpentine = sr % 2 === 0 ? sc : scan.ny - 1 - sc;
+          const m = measureAt(sr * scan.stride, serpentine * scan.stride);
+          const cell = sr * scan.ny + serpentine;
+          scan.abf[cell] = m.abf;
+          scan.adf[cell] = m.adf;
+          scan.comX[cell] = m.comX;
+          scan.comY[cell] = m.comY;
+          if (!scan.seen[cell]) { scan.seen[cell] = 1; scan.count++; }
+        }
+        scan.cursor = (scan.cursor + batch) % cells;
+        budget.report(performance.now() - scanStarted);
+
+        // Where the raster has reached — rounded down to every fourth position,
+        // so the drawn probe steps deliberately instead of skittering across the
+        // scene faster than the eye can follow.
+        const settled = (Math.floor(scan.cursor / 4) * 4) % cells;
+        const hr = Math.floor(settled / scan.ny);
+        const hc = settled % scan.ny;
+        probeState.row = hr * scan.stride;
+        probeState.col = (hr % 2 === 0 ? hc : scan.ny - 1 - hc) * scan.stride;
+      }
+
+      // --- what the probe sees right now ------------------------------------
+      // Snap a reader-driven probe onto the scan grid. The measurement is then
+      // exactly that pixel's value, so an unvisited pixel can simply be filled in
+      // — hovering paints the image rather than only reading it — and the marker
+      // lands on a pixel centre rather than between two.
+      if (!rastering) {
+        const sr = Math.min(scan.nx - 1, Math.max(0, Math.round(probeState.row / scan.stride)));
+        const sc = Math.min(scan.ny - 1, Math.max(0, Math.round(probeState.col / scan.stride)));
+        probeState.row = sr * scan.stride;
+        probeState.col = sc * scan.stride;
+      }
+      const key = `${probeState.row},${probeState.col}`;
+      if (displayCache.key !== key) {
+        displayCache.key = key;
+        displayCache.value = measureAt(probeState.row, probeState.col, {keepExit: true});
+      }
+      const here = displayCache.value;
+
+      if (!rastering) {
+        const cell = Math.round(probeState.row / scan.stride) * scan.ny +
+                     Math.round(probeState.col / scan.stride);
+        if (cell >= 0 && cell < cells && !scan.seen[cell]) {
+          scan.abf[cell] = here.abf;
+          scan.adf[cell] = here.adf;
+          scan.comX[cell] = here.comX;
+          scan.comY[cell] = here.comY;
+          scan.seen[cell] = 1;
+          scan.count++;
+        }
+      }
+
+      // The probe sits at index (0, 0), so roll the exit wave to bring it to the
+      // middle before cutting the square crop out.
+      const rolled = {re: new Float64Array(nx * ny), im: new Float64Array(nx * ny)};
+      const offX = probeState.row - Math.floor(nx / 2);
+      const offY = probeState.col - Math.floor(ny / 2);
+      for (let i = 0; i < nx; i++) {
+        const si = (((i + offX) % nx) + nx) % nx;
+        for (let j = 0; j < ny; j++) {
+          const sj = (((j + offY) % ny) + ny) % ny;
+          rolled.re[i * ny + j] = here.exit.re[si * ny + sj];
+          rolled.im[i * ny + j] = here.exit.im[si * ny + sj];
+        }
+      }
+      const exitCrop = cropCenterComplex(rolled, nx, ny, cropWidth, cropWidth);
+      exitCanvas.getContext("2d").putImageData(
+        transposeToImageData(
+          complexToRGB({re: exitCrop.re, im: exitCrop.im}, {vmin: 0, vmax: 0.98, power: 2}),
+          cropWidth, cropWidth
+        ), 0, 0
+      );
+
+      const pattern = cropCenter(
+        fftshift(Float64Array.from(here.intensity, Math.sqrt), nx, ny),
+        nx, ny, patternGpts[0], patternGpts[1]
+      );
+      // Anisotropic in pixels, isotropic in angle — drawn into a square panel,
+      // which stretches it back to circular.
+      dpCanvas.ctx.putImageData(
+        transposeToImageData(
+          applyColormap(histogramScaling(pattern.data, {vmin: 0, vmax: 1}), {colormap: "magma"}),
+          pattern.nx, pattern.ny
+        ), 0, 0
+      );
+
+      // --- the scene --------------------------------------------------------
+      ctx.clearRect(0, 0, W, H);
+      const probeScene = toScene(probeState.row * sampling[0], probeState.col * sampling[1]);
+      const angleToRadius = (mrad) =>
+        Math.min(geom.detectorHalf * 1.02, geom.detectorHalf * (mrad / maxAngle));
+
+      // The waist sits `defocus + focusOffset` downstream of the entrance, and
+      // downstream is -z here, so zero defocus lands on the middle of the
+      // specimen. Clamped only so the cone stays inside the drawing.
+      const crossoverZ = Math.max(
+        geom.zDetector + 1,
+        Math.min(geom.zAperture - 1,
+                 geom.entrance - (optics.defocus + focusOffset) * geom.scale)
+      );
+
+      // One straight cone, pinned to the bright-field disc at the detector.
+      //
+      // No single cone can be right everywhere: above the specimen the beam is a
+      // real-space cone whose half-angle is the aperture's, while the plane the
+      // pattern is drawn on is the DIFFRACTION plane, where the disc has a radius
+      // set by α alone whatever the defocus. Fixing the half-angle makes the beam
+      // miss its own disc; pinning the disc makes the half-angle drift with
+      // defocus. Splitting the difference — a kink at the exit surface — is the
+      // most obviously wrong of the three, because it puts a change of
+      // convergence angle *after* the cross-over, which no lens does.
+      //
+      // So: keep the disc, accept the drift, and keep the defocus range short
+      // enough that the drift stays quiet. ±15 Å is not much probe broadening —
+      // a 20 mrad probe at 80 kV is already 2.5 Å across — but these signals are
+      // essentially in-focus ones, and showing them soften is the whole ask.
+      const beam = {
+        x: probeScene.x, y: probeScene.y,
+        zAperture: geom.zAperture, zDetector: geom.zDetector,
+        detectorRadius: angleToRadius(optics.semiangle),
+        crossoverZ
+      };
+      const beamRadiusAtZ = (z) => {
+        const slope = beam.detectorRadius / Math.abs(geom.zDetector - crossoverZ);
+        return Math.abs(z - crossoverZ) * slope;
+      };
+
+      // No descan: the detector travels with the probe, carrying the pattern.
+      drawPlaneBanded(ctx, camera, dpCanvas.canvas, probeScene.x, probeScene.y,
+        geom.zDetector, geom.detectorHalf, {border: "rgba(140,140,150,0.35)", smooth: true});
+
+      // Rings through the specimen, where the cone itself is cut away so the
+      // atoms can be seen. Drawn in full behind the specimen and then again as
+      // near halves in front of it, so the beam passes *through* the particle
+      // instead of over or under it — which is what makes the defocus readable.
+      const specimenRings = [];
+      for (let d = 1; d <= 5; d++) {
+        specimenRings.push(geom.exit + ((geom.entrance - geom.exit) * d) / 6);
+      }
+      const drawSpecimenRings = (half) => {
+        ctx.save();
+        ctx.strokeStyle = "rgba(64,196,132,0.95)";
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = half === "near" ? 0.95 : 0.5;
+        for (const z of specimenRings) {
+          const r = beamRadiusAtZ(z);
+          if (r > 0.02) ring(ctx, camera, beam.x, beam.y, z, r, {half});
+        }
+        ctx.restore();
+      };
+
+      drawProbeCone(ctx, camera, {...beam, zSample: geom.exit, part: "lower", disks: 4});
+      drawSpecimenRings("far");
+      ctx.drawImage(specimenLayer.canvas, 0, 0, W, H);
+      drawSpecimenRings("near");
+      drawProbeCone(ctx, camera, {...beam, zSample: geom.entrance, part: "upper", disks: 4});
+
+      // --- the diffraction panel, with its detector and its centre of mass ---
+      const dp = underPanels.panels[1];
+      dp.ctx.clearRect(0, 0, dp.width, dp.height);
+      dp.ctx.imageSmoothingEnabled = true;
+      dp.ctx.drawImage(dpCanvas.canvas, 0, 0, dp.width, dp.height);
+      // Every detector, drawn over the pattern it collects. Three sliders that
+      // change nothing visible are three sliders nobody touches — and the point
+      // of the widget is that the region you add up decides the image.
+      (() => {
+        const c = dp.ctx;
+        const half = dp.width / 2;
+        const px = (mrad) => (mrad / maxAngle) * half;
+        const annulus = (r0, r1, fill) => {
+          c.beginPath();
+          c.arc(half, half, r1, 0, 2 * Math.PI);
+          c.arc(half, half, Math.max(0, r0), 0, 2 * Math.PI, true);
+          c.fillStyle = fill;
+          c.fill("evenodd");
+        };
+        c.save();
+
+        annulus(px(angles.inner), px(angles.outer), DETECTOR.segmentFill);
+
+        c.lineWidth = 1;
+        c.strokeStyle = DETECTOR.segments;
+        for (const mrad of detector.edges) {
+          if (mrad <= 0) continue;
+          c.beginPath();
+          c.arc(half, half, px(mrad), 0, 2 * Math.PI);
+          c.stroke();
+        }
+        for (let k = 0; k < detector.sectors; k++) {
+          const a = detector.rotation + (k * 2 * Math.PI) / detector.sectors;
+          c.beginPath();
+          c.moveTo(half + Math.cos(a) * px(angles.inner), half + Math.sin(a) * px(angles.inner));
+          c.lineTo(half + Math.cos(a) * px(angles.outer), half + Math.sin(a) * px(angles.outer));
+          c.stroke();
+        }
+
+        c.strokeStyle = DETECTOR.adf;
+        c.beginPath(); c.arc(half, half, px(angles.adfOuter), 0, 2 * Math.PI); c.stroke();
+
+        // The centre of mass the segments report — the quantity the CoM and iCoM
+        // panels are built from, shown where it actually lives.
+        //
+        // Short arms rather than full-width rules: the centre of mass swings
+        // right across the pattern from one scan position to the next, and at
+        // thirty frames a second a pair of full-length lines flickering about
+        // reads as several lines at once rather than as one moving marker.
+        const cx = half + px(here.comX * wavelength * 1e3);
+        const cy = half + px(here.comY * wavelength * 1e3);
+        const arm = 7;
+        c.strokeStyle = DETECTOR.com;
+        c.lineWidth = 1.2;
+        c.beginPath();
+        c.moveTo(cx - arm, cy); c.lineTo(cx - 2, cy);
+        c.moveTo(cx + 2, cy); c.lineTo(cx + arm, cy);
+        c.moveTo(cx, cy - arm); c.lineTo(cx, cy - 2);
+        c.moveTo(cx, cy + 2); c.lineTo(cx, cy + arm);
+        c.stroke();
+        c.fillStyle = DETECTOR.com;
+        c.beginPath(); c.arc(cx, cy, 1.4, 0, 2 * Math.PI); c.fill();
+        c.restore();
+      })();
+
+      underPanels.panels[0].ctx.imageSmoothingEnabled = true;
+      underPanels.panels[0].ctx.drawImage(
+        exitCanvas, 0, 0, underPanels.panels[0].width, underPanels.panels[0].height);
+
+      // --- signal panels ----------------------------------------------------
+      // Repainted when a scan row completes, not every frame. Four colormapped
+      // images plus a Fourier integration is real work, and none of it changes
+      // within a row — deferring it hands the time back to the scan, which is
+      // what the reader is actually waiting for.
+      const rowsDone = Math.floor(scan.count / scan.ny);
+      const stale = performance.now() - scan.paintedAt > 500;
+      const repaint = rowsDone !== scan.paintedRows || (stale && !complete);
+
+      const paint = (index, rgba, {mask = true, columns = scan.nx} = {}) => {
+        if (mask) {
+          for (let i = 0; i < scan.seen.length; i++) if (!scan.seen[i]) rgba[i * 4 + 3] = 0;
+        }
+        const layer = panelLayers[index];
+        scanCanvas.ctx.clearRect(0, 0, scan.nx, scan.ny);
+        scanCanvas.ctx.putImageData(transposeToImageData(rgba, columns, scan.ny), 0, 0);
+        layer.ctx.clearRect(0, 0, layer.width, layer.height);
+        layer.ctx.imageSmoothingEnabled = true;
+        layer.ctx.drawImage(scanCanvas.canvas, 0, 0, scan.nx, scan.ny,
+                            0, 0, layer.width, layer.height);
+      };
+
+      if (repaint) {
+        scan.paintedRows = rowsDone;
+        scan.paintedAt = performance.now();
+        paint(0, applyColormap(histogramScaling(scan.abf), {colormap: "gray"}));
+        paint(1, applyColormap(histogramScaling(scan.adf), {colormap: "inferno"}));
+        paint(2, complexToRGB({re: scan.comX, im: scan.comY}, {vmin: 0, vmax: 1}));
+
+        // iCoM is a Fourier integration over the whole field, not a per-pixel
+        // quantity: a half-filled buffer would integrate its own empty half and
+        // give an answer that changes everywhere as the scan advances. Integrate
+        // the completed rows only — a rectangle, and therefore well posed — and
+        // redraw all of it each time.
+        if (rowsDone > 1) {
+          const n = rowsDone * scan.ny;
+          const T = integrateGradient(scan.comX.subarray(0, n), scan.comY.subarray(0, n),
+                                      rowsDone, scan.ny, scan.step);
+          paint(3, applyColormap(histogramScaling(T), {colormap: "magma"}),
+                {mask: false, columns: rowsDone});
+        } else {
+          // Fewer than two rows: nothing to integrate. Clear it, or "clear
+          // signals" would leave the last reconstruction sitting there.
+          const layer = panelLayers[3];
+          layer.ctx.clearRect(0, 0, layer.width, layer.height);
+        }
+      }
+
+      // Compose: the stored image, then the probe. Marking where the reader has
+      // put the probe is what connects the scene on the left to the images on the
+      // right — without it the four panels are just pictures.
+      const markX = ((probeState.row / scan.stride + 0.5) / scan.nx);
+      const markY = ((probeState.col / scan.stride + 0.5) / scan.ny);
+      signalPanels.panels.forEach((panel, i) => {
+        panel.ctx.clearRect(0, 0, panel.width, panel.height);
+        panel.ctx.drawImage(panelLayers[i].canvas, 0, 0);
+        if (markX < 0 || markX > 1 || markY < 0 || markY > 1) return;
+        const mx = markX * panel.width, my = markY * panel.height;
+        panel.ctx.save();
+        panel.ctx.lineWidth = 2.5;
+        panel.ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
+        panel.ctx.lineWidth = 1.2;
+        panel.ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
+        panel.ctx.restore();
+      });
+
+      readout.textContent =
+        `${optics.semiangle} mrad · 80 kV · ${nSlices === 1 ? "1 slice" : `${nSlices} slices`} · ` +
+        `scan ${scan.count}/${cells} at ${scan.step[0].toFixed(2)} Å · ` +
+        `${(performance.now() - started).toFixed(0)} ms/frame` +
+        (batch ? ` (${batch} pos)`
+          : complete ? " · complete"
+          : !scanning ? " · paused"
+          : probeState.pinned ? " · pinned"
+          : probeState.hovering ? " · following the pointer"
+          : " · idle");
+      return started;
+    })()
+  </script>
+  <script id="56" type="text/x-typescript">
+    const stemExperiment = display(layout);
+  </script>
+  <script id="57" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+</notebook>

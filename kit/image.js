@@ -257,6 +257,127 @@ export function applyShotNoise(intensity, dose, random = Math.random) {
 }
 
 /**
+ * Integrate a gradient field back to the scalar it came from, in Fourier space.
+ *
+ * This is the step that turns a centre-of-mass vector field into a phase — iCoM,
+ * or integrated DPC. Solving `∇·g = ∇²T` gives
+ *
+ *     T̂(k) = (k₀·ĝ₀ + k₁·ĝ₁) / (2πi |k|²)
+ *
+ * Ported from abtem's `_integrate_gradient_2d` (`measurements.py:2239`),
+ * including its DC guard (|k|² floored at 1e-12) and its final shift so the
+ * minimum is zero. There is no other regularisation: the result is dominated by
+ * low frequencies and will look noisy until a scan is reasonably complete.
+ *
+ * @param {ArrayLike<number>} g0 gradient along the first axis
+ * @param {ArrayLike<number>} g1 gradient along the second axis
+ * @param {number} nx
+ * @param {number} ny
+ * @param {[number, number]} sampling
+ * @returns {Float64Array} the integrated scalar field, minimum zero
+ */
+export function integrateGradient(g0, g1, nx, ny, [sx, sy]) {
+  const k0 = new Float64Array(nx);
+  const k1 = new Float64Array(ny);
+  for (let i = 0; i < nx; i++) k0[i] = (i < (nx + 1) >> 1 ? i : i - nx) / (nx * sx);
+  for (let i = 0; i < ny; i++) k1[i] = (i < (ny + 1) >> 1 ? i : i - ny) / (ny * sy);
+
+  const F0 = fft2(toComplex(g0), nx, ny);
+  const F1 = fft2(toComplex(g1), nx, ny);
+
+  const out = complex(nx * ny);
+  for (let ix = 0; ix < nx; ix++) {
+    for (let iy = 0; iy < ny; iy++) {
+      const i = ix * ny + iy;
+      const k2 = Math.max(k0[ix] * k0[ix] + k1[iy] * k1[iy], 1e-12);
+      const nr = F0.re[i] * k0[ix] + F1.re[i] * k1[iy];
+      const ni = F0.im[i] * k0[ix] + F1.im[i] * k1[iy];
+      // Divide by 2πi|k|²: multiplying by -i swaps the parts and negates one.
+      const d = 2 * Math.PI * k2;
+      out.re[i] = ni / d;
+      out.im[i] = -nr / d;
+    }
+  }
+  ifft2(out, nx, ny);
+
+  let min = Infinity;
+  for (let i = 0; i < out.re.length; i++) if (out.re[i] < min) min = out.re[i];
+  const result = new Float64Array(out.re.length);
+  for (let i = 0; i < result.length; i++) result[i] = out.re[i] - min;
+  return result;
+}
+
+/**
+ * Bin a 2D array by an integer factor, averaging each block.
+ *
+ * The cheapest way to buy frame budget: binning by 2 quarters the pixel count
+ * and cuts an FFT-bound render to roughly a quarter of its cost, which is what
+ * makes a live multislice scene animate at all.
+ *
+ * @param {ArrayLike<number>} array row-major, nx*ny
+ * @param {number} [factor=2]
+ * @returns {{data: Float64Array, nx: number, ny: number}}
+ */
+export function binArray(array, nx, ny, factor = 2) {
+  const outX = Math.floor(nx / factor);
+  const outY = Math.floor(ny / factor);
+  const data = new Float64Array(outX * outY);
+  const norm = 1 / (factor * factor);
+  for (let ix = 0; ix < outX; ix++) {
+    for (let iy = 0; iy < outY; iy++) {
+      let sum = 0;
+      for (let dx = 0; dx < factor; dx++) {
+        const row = (ix * factor + dx) * ny;
+        for (let dy = 0; dy < factor; dy++) sum += array[row + iy * factor + dy];
+      }
+      data[ix * outY + iy] = sum * norm;
+    }
+  }
+  return {data, nx: outX, ny: outY};
+}
+
+/**
+ * Crop a `size` x `size` window whose ORIGIN is at (row, col), wrapping at the
+ * edges.
+ *
+ * The origin, rather than the centre, is at the probe: a probe from `ifft2` sits
+ * at index (0,0), so the two line up with no shifting.
+ *
+ * **This is an approximation, and not always a small one.** Propagating a probe
+ * through a window instead of the full field is cheap — a 64x64 window costs
+ * 13x less than a 244x242 field — and it is exact only while the probe's support
+ * stays within `size / 2` of the origin. A converged probe looks compact, but a
+ * hard aperture gives it Airy tails that fall off as 1/r, and on the torus the
+ * window defines those tails wrap back onto the specimen.
+ *
+ * Measured on a 22 Å gold particle at 0.2 Å sampling, a 20 mrad probe and 80 kV:
+ * a 64-wide window (12.8 Å) **inverted** the sign of the integrated centre of
+ * mass, and 96 still did; only at 128 (25.6 Å) did the contrast come out the
+ * right way round, and even then the image correlated poorly with the full-field
+ * answer. Nothing about the result looks wrong — it is a plausible image of the
+ * right object with the contrast reversed. If a widget can afford the full grid,
+ * it should use the full grid.
+ */
+export function cropWrap(array, nx, ny, row, col, size) {
+  const out = new Float64Array(size * size);
+  for (let i = 0; i < size; i++) {
+    const src = (((row + i) % nx) + nx) % nx;
+    for (let j = 0; j < size; j++) {
+      out[i * size + j] = array[src * ny + ((((col + j) % ny) + ny) % ny)];
+    }
+  }
+  return out;
+}
+
+/** {@link cropWrap} for a complex `{re, im}` array. */
+export function cropWrapComplex({re, im}, nx, ny, row, col, size) {
+  return {
+    re: cropWrap(re, nx, ny, row, col, size),
+    im: cropWrap(im, nx, ny, row, col, size)
+  };
+}
+
+/**
  * Crop the centre out of a 2D array.
  *
  * A focused probe occupies a handful of pixels in a 244 x 242 field, and a

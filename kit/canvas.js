@@ -8,14 +8,47 @@
 import {applyColormap, complexToRGB} from "./color.js";
 
 /**
- * Wrap an RGBA byte array as ImageData.
+ * Wrap an RGBA byte array as ImageData, with the first axis **vertical**.
  *
- * Note the axis convention: our arrays are row-major `[ix * ny + iy]` with `ix`
- * the first (vertical) axis, matching numpy — so the image is `ny` wide and
- * `nx` tall, exactly like `imshow`.
+ * Our arrays are row-major `[ix * ny + iy]`, and here `ix` is the first
+ * (vertical) axis, matching numpy — so the image is `ny` wide and `nx` tall,
+ * exactly like `imshow`. This is the right choice when the array came from an
+ * image in the first place.
+ *
+ * When the first axis is a physical **x** instead — a scan whose first index
+ * runs along the field's width, a diffraction pattern indexed by `kx` — use
+ * {@link transposeToImageData}, which puts it horizontal.
  */
 export function toImageData(rgba, nx, ny) {
   return new ImageData(rgba, ny, nx);
+}
+
+/**
+ * Wrap an RGBA byte array as ImageData, with the first axis **horizontal**.
+ *
+ * The counterpart to {@link toImageData}: this one transposes, so `nx` becomes
+ * the image's width. Reach for it whenever the first array index is a physical
+ * x — otherwise the picture comes out on its side, which on a square array is a
+ * silent 90° rotation and on a rectangular one a stretch. Nothing throws either
+ * way, so the mistake survives until someone notices the image looks wrong.
+ *
+ * @param {Uint8ClampedArray} rgba 4 bytes per sample, `[ix * ny + iy]`
+ * @param {number} nx samples along x — the returned image's width
+ * @param {number} ny samples along y — its height
+ */
+export function transposeToImageData(rgba, nx, ny) {
+  const out = new Uint8ClampedArray(nx * ny * 4);
+  for (let ix = 0; ix < nx; ix++) {
+    for (let iy = 0; iy < ny; iy++) {
+      const from = (ix * ny + iy) * 4;
+      const to = (iy * nx + ix) * 4;
+      out[to] = rgba[from];
+      out[to + 1] = rgba[from + 1];
+      out[to + 2] = rgba[from + 2];
+      out[to + 3] = rgba[from + 3];
+    }
+  }
+  return new ImageData(out, nx, ny);
 }
 
 /**
