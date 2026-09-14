@@ -3,21 +3,29 @@
   <title>A 4D-STEM experiment</title>
   <script id="1" type="text/markdown">
     # A 4D-STEM experiment
-
+  </script>
+  <script id="1b" type="text/markdown">
     Gold nanoparticles on an amorphous carbon film. The probe converges through
     the specimen and every scattered electron lands somewhere on the detector
     below — and *which part* of the detector you add up decides what the image
     shows.
 
-    The scan runs by itself, filling the four signal panels as it goes.
-    **Hover** over the scene to take the probe yourself; **click** to pin it.
+    Press **▶ scan** to raster the probe across the field, filling the four
+    signal panels as it goes. Or **hover** over the scene to drive the probe
+    yourself — it fills in whatever pixel it lands on — and **click** to pin it.
 
     Nothing here is precomputed: the atoms, their projected potential, the exit
     wave, the diffraction pattern and every detector signal are computed in your
     browser — the same multislice abtem runs, on the full grid, agreeing with it
     to one part in a million.
   </script>
-  <script id="2" type="text/x-typescript" pinned="">
+  <script id="64" type="text/x-typescript">
+    const stemExperiment = display(layout);
+  </script>
+  <script id="65" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+  <script id="2" type="text/x-typescript">
     import {
       electronWavelength, interactionParameter,
       complexProbe, fresnelPropagator, multislice, multisliceSpectrum, bandlimit,
@@ -34,36 +42,35 @@
       frames, whenVisible, qualityBudget
     } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
   </script>
-  <script id="3" type="text/x-typescript" pinned="">
+  <script id="4" type="text/x-typescript">
+    const sampling = [0.25, 0.25]
+  </script>
+  <script id="3" type="text/x-typescript">
     // 48 x 32 A. Small enough that every scan position is a full-grid multislice
     // — no windowing, so the exit wave and the diffraction pattern are exactly
     // what abtem would give for this cell.
     const fov = [48, 32]
   </script>
-  <script id="4" type="text/x-typescript" pinned="">
-    const sampling = [0.25, 0.25]
-  </script>
-  <script id="5" type="text/x-typescript" pinned="">
+  <script id="5" type="text/x-typescript">
     const gpts = [Math.round(fov[0] / sampling[0]), Math.round(fov[1] / sampling[1])]
   </script>
-  <script id="6" type="text/x-typescript" pinned="">
+  <script id="6" type="text/x-typescript">
     // Fixed, rather than a slider. The largest angle a grid can represent is
     // lambda / 2dx, so changing the voltage would slide the whole detector range
     // out from under the reader: at 300 kV this grid would not reach the ADF
     // ring at all.
     const energy = 80e3
   </script>
-  <script id="7" type="text/x-typescript" pinned="">
+  <script id="7" type="text/x-typescript">
     const wavelength = electronWavelength(energy)
   </script>
-  <script id="8" type="text/x-typescript" pinned="">
+  <script id="8" type="text/x-typescript">
     // Everything past 2/3 of Nyquist is removed by the antialiasing aperture
     // multislice needs, so this — not the Nyquist angle — is the largest angle
     // the simulation can honestly report.
     const maxAngle = (((2 / 3) * wavelength) / (2 * sampling[0])) * 1e3
   </script>
-
-  <script id="9" type="text/x-typescript" pinned="">
+  <script id="9" type="text/x-typescript">
     // Controls are built as nodes here and read with `Generators.input`, rather
     // than with `view`, so the layout cell can place them where they belong
     // instead of leaving them stranded above the figure.
@@ -80,13 +87,13 @@
       {columns: 1, minWidth: 0, compact: true}
     )
   </script>
-  <script id="10" type="text/x-typescript" pinned="">
+  <script id="10" type="text/x-typescript">
     const specimenControls = Generators.input(specimenFields)
   </script>
-  <script id="10b" type="text/x-typescript" pinned="">
+  <script id="11" type="text/x-typescript">
     const specimenForm = collapsible("specimen", specimenFields, true)
   </script>
-  <script id="11" type="text/x-typescript" pinned="">
+  <script id="12" type="text/x-typescript">
     const opticsFields = gridControls(
       Inputs.form({
         defocus: Inputs.range([-15, 15], {value: 0, step: 2.5, label: "defocus (Å)"}),
@@ -97,13 +104,13 @@
       {columns: 1, minWidth: 0, compact: true}
     )
   </script>
-  <script id="12" type="text/x-typescript" pinned="">
+  <script id="13" type="text/x-typescript">
     const optics = Generators.input(opticsFields)
   </script>
-  <script id="12b" type="text/x-typescript" pinned="">
+  <script id="14" type="text/x-typescript">
     const opticsForm = collapsible("optics", opticsFields, true)
   </script>
-  <script id="13" type="text/x-typescript" pinned="">
+  <script id="15" type="text/x-typescript">
     // Detector and scan in one form, because they share a column and because a
     // change to either invalidates the same thing: every accumulated signal.
     //
@@ -128,10 +135,10 @@
       {columns: 2, minWidth: 0, compact: true}
     )
   </script>
-  <script id="14" type="text/x-typescript" pinned="">
+  <script id="16" type="text/x-typescript">
     const instrument = Generators.input(instrumentFields)
   </script>
-  <script id="14a" type="text/x-typescript" pinned="">
+  <script id="17" type="text/x-typescript">
     // Outside the form, so it can share a line with the two buttons — which
     // means it must not behave like a form either: `controls` lays its grid out
     // across the full width, and a full-width toggle pushes the buttons onto a
@@ -147,10 +154,10 @@
       return box;
     })()
   </script>
-  <script id="14c" type="text/x-typescript" pinned="">
+  <script id="18" type="text/x-typescript">
     const multisliceOn = Generators.input(multisliceToggle)
   </script>
-  <script id="14b" type="text/x-typescript" pinned="">
+  <script id="19" type="text/x-typescript">
     const instrumentForm = collapsible("detector & scan", (() => {
       const box = document.createElement("div");
       const line = row([multisliceToggle, scanButton, clearButton], {gap: 10, align: "center"});
@@ -160,13 +167,13 @@
       return box;
     })(), true)
   </script>
-  <script id="17" type="text/x-typescript" pinned="">
-    const scanButton = toggleButton({on: "■ pause scan", off: "▶ scan", value: true})
+  <script id="20" type="text/x-typescript">
+    const scanButton = toggleButton({on: "■ pause scan", off: "▶ scan", value: false})
   </script>
-  <script id="18" type="text/x-typescript" pinned="">
+  <script id="21" type="text/x-typescript">
     const scanning = Generators.input(scanButton)
   </script>
-  <script id="19" type="text/x-typescript" pinned="">
+  <script id="22" type="text/x-typescript">
     const clearButton = (() => {
       const button = document.createElement("button");
       button.type = "button";
@@ -183,11 +190,10 @@
       return button;
     })()
   </script>
-  <script id="20" type="text/x-typescript" pinned="">
+  <script id="23" type="text/x-typescript">
     const clearCount = Generators.input(clearButton)
   </script>
-
-  <script id="21" type="text/x-typescript" pinned="">
+  <script id="24" type="text/x-typescript">
     // Two gold particles at different orientations — one with a ⟨111⟩ zone axis
     // along the beam, one not — so the scan shows orientation contrast, pressed
     // into an amorphous carbon film.
@@ -236,7 +242,7 @@
       return {gold, carbon, entrance, exit, thickness: entrance - exit};
     })()
   </script>
-  <script id="21b" type="text/x-typescript" pinned="">
+  <script id="25" type="text/x-typescript">
     // Film beyond the simulated cell, for the 3D view only. Without it the
     // specimen ends in mid-air at the edge of the field, which reads as a small
     // chip of carbon rather than as a film the probe is scanning a patch of.
@@ -256,7 +262,7 @@
       return wide.filter((p) => p[0] < 0 || p[0] > fov[0]);
     })()
   </script>
-  <script id="22" type="text/x-typescript" pinned="">
+  <script id="26" type="text/x-typescript">
     // Multislice cuts the specimen into slabs of about this thickness, so the
     // slice count follows the specimen instead of being a number the reader has
     // to pick. A thin film needs two slices; a tall particle needs several.
@@ -264,7 +270,7 @@
       ? Math.max(2, Math.round(specimen.thickness / 4))
       : 1
   </script>
-  <script id="23" type="text/x-typescript" pinned="">
+  <script id="27" type="text/x-typescript">
     // Projected potential per slice — the Lobato/Fourier superposition abtem
     // uses, with the atoms binned by depth first. One FFT pair per element per
     // slice, a few milliseconds in all, and only when the specimen changes.
@@ -290,10 +296,10 @@
       ));
     })()
   </script>
-  <script id="24" type="text/x-typescript" pinned="">
+  <script id="28" type="text/x-typescript">
     const doseValue = optics.dose === "∞" ? Infinity : Number(optics.dose)
   </script>
-  <script id="25" type="text/x-typescript" pinned="">
+  <script id="29" type="text/x-typescript">
     // One transmission function per slice. Band-limited, because multislice
     // aliases badly without it — see `antialiasAperture` in the kit.
     const transmission = (() => {
@@ -305,15 +311,15 @@
       });
     })()
   </script>
-  <script id="26" type="text/x-typescript" pinned="">
+  <script id="30" type="text/x-typescript">
     const propagator = fresnelPropagator(
       gpts, sampling, energy, specimen.thickness / nSlices
     )
   </script>
-  <script id="27" type="text/x-typescript" pinned="">
+  <script id="31" type="text/x-typescript">
     const angular = angularSpatialFrequencies(gpts, sampling, wavelength)
   </script>
-  <script id="28" type="text/x-typescript" pinned="">
+  <script id="32" type="text/x-typescript">
     // Detector radii in mrad, clamped to the angle the grid can represent.
     const angles = (() => {
       const a = optics.semiangle;
@@ -326,7 +332,7 @@
       };
     })()
   </script>
-  <script id="29" type="text/x-typescript" pinned="">
+  <script id="33" type="text/x-typescript">
     const detector = segmentedDetector(angular, {
       inner: angles.inner,
       outer: angles.outer,
@@ -334,7 +340,7 @@
       rotation: (instrument.rotation * Math.PI) / 180
     })
   </script>
-  <script id="30" type="text/x-typescript" pinned="">
+  <script id="34" type="text/x-typescript">
     // One index map for every segment, so a scan position costs a single pass
     // over the pattern rather than one per segment.
     const detectorIndex = (() => {
@@ -347,7 +353,7 @@
       };
     })()
   </script>
-  <script id="31" type="text/x-typescript" pinned="">
+  <script id="35" type="text/x-typescript">
     // Zero defocus puts the waist at the MIDDLE of the specimen, which is where
     // a microscopist focuses. Multislice necessarily builds the probe at the
     // entrance plane, so the aberration carries the extra half-thickness.
@@ -357,7 +363,7 @@
     // flipped when the propagator's did and nothing about the picture said so.
     const focusOffset = specimen.thickness / 2
   </script>
-  <script id="31b" type="text/x-typescript" pinned="">
+  <script id="36" type="text/x-typescript">
     // The probe sits at index (0, 0), so moving to a scan position is a plain
     // index shift — no phase ramp, no extra transform.
     const probe = ifft2(
@@ -369,7 +375,7 @@
       gpts[0], gpts[1]
     )
   </script>
-  <script id="32" type="text/x-typescript" pinned="">
+  <script id="37" type="text/x-typescript">
     // One scan position: shift the probe, propagate, collect every detector.
     //
     // The probe moves by reading it at a rolled index rather than by a Fourier
@@ -442,7 +448,7 @@
       };
     }
   </script>
-  <script id="33" type="text/x-typescript" pinned="">
+  <script id="38" type="text/x-typescript">
     // Everything that invalidates a signal is a dependency, so the buffers clear
     // themselves when any of it changes — and `clearCount` forces the same.
     const scan = (() => {
@@ -464,7 +470,7 @@
       };
     })()
   </script>
-  <script id="34" type="text/x-typescript" pinned="">
+  <script id="39" type="text/x-typescript">
     // One measurement per probe position, kept until something invalidates it.
     //
     // Without this the displayed pattern is re-simulated 30 times a second even
@@ -474,11 +480,11 @@
     // optics, the detector or the specimen change.
     const displayCache = (() => { measureAt; return {key: null, value: null}; })()
   </script>
-  <script id="35" type="text/x-typescript" pinned="">
+  <script id="40" type="text/x-typescript">
     // One scratch canvas per scan grid, rather than four per frame.
     const scanCanvas = makeCanvas(scan.nx, scan.ny, {dpr: 1})
   </script>
-  <script id="35b" type="text/x-typescript" pinned="">
+  <script id="41" type="text/x-typescript">
     // The rendered image for each signal panel, held at panel resolution.
     //
     // The images are only redrawn when a scan row completes, but the probe marker
@@ -486,21 +492,20 @@
     // layer plus the marker, rather than being re-colormapped just to move a dot.
     const panelLayers = signalPanels.panels.map((p) => makeCanvas(p.width, p.height, {dpr: 1}))
   </script>
-  <script id="36" type="text/x-typescript" pinned="">
+  <script id="42" type="text/x-typescript">
     const budget = qualityBudget({min: 1, max: 32, slowMs: 14, fastMs: 9})
   </script>
-
-  <script id="37" type="text/x-typescript" pinned="">
+  <script id="43" type="text/x-typescript">
     const sceneWidth = Math.round(Math.max(300, Math.min(400, (width - 30) * 0.42)))
   </script>
-  <script id="38" type="text/x-typescript" pinned="">
+  <script id="44" type="text/x-typescript">
     const stage = scene({
       width: sceneWidth,
       height: 360,
       hint: "hover to drive the probe · click to pin it"
     })
   </script>
-  <script id="39" type="text/x-typescript" pinned="">
+  <script id="45" type="text/x-typescript">
     // What sits under the probe right now: the exit wave, cropped around it, and
     // the pattern that wave makes on the detector — which is hard to read
     // edge-on in the 3D scene.
@@ -512,12 +517,12 @@
       ]);
     })()
   </script>
-  <script id="40" type="text/x-typescript" pinned="">
+  <script id="46" type="text/x-typescript">
     const panelWidth = Math.round(
       Math.max(150, Math.min(215, (width - sceneWidth - 36) / 2))
     )
   </script>
-  <script id="40b" type="text/x-typescript" pinned="">
+  <script id="47" type="text/x-typescript">
     // The four images the scan forms, two by two, in the field's own 3:2 aspect.
     const signalPanels = (() => {
       const w = panelWidth;
@@ -530,10 +535,10 @@
       ], {columns: 2, inset: true});
     })()
   </script>
-  <script id="41" type="text/x-typescript" pinned="">
+  <script id="48" type="text/x-typescript">
     const readout = badge()
   </script>
-  <script id="41b" type="text/x-typescript" pinned="">
+  <script id="49" type="text/x-typescript">
     // One colour per detector, used on the diffraction panel and on the detector
     // plane in the 3D scene, so the two read as the same object.
     const DETECTOR = {
@@ -543,7 +548,7 @@
       com: "rgba(255,255,255,0.95)"
     }
   </script>
-  <script id="42" type="text/x-typescript" pinned="">
+  <script id="50" type="text/x-typescript">
     // Built once. A layout rebuilt inside the animation loop re-parents the
     // canvases thirty times a second, and a re-parented element never receives
     // its `pointerleave` — the widget then believes the pointer is still on it
@@ -579,8 +584,7 @@
       return row([left, right]);
     })()
   </script>
-
-  <script id="43" type="text/x-typescript" pinned="">
+  <script id="51" type="text/x-typescript">
     // One scale for all three axes. An anisotropic z looks tidier for a flat slab
     // but turns a nanoparticle into a mound, which is the opposite of the point.
     const geom = (() => {
@@ -603,7 +607,7 @@
       };
     })()
   </script>
-  <script id="44" type="text/x-typescript" pinned="">
+  <script id="52" type="text/x-typescript">
     const camera = (() => {
       const fl = 150, elevation = -24, margin = 14;
       const trial = makeView(0, elevation, 1, 0, 0, fl);
@@ -628,13 +632,13 @@
         stage.height / 2 - ((y0 + y1) / 2) * zoom, fl);
     })()
   </script>
-  <script id="45" type="text/x-typescript" pinned="">
+  <script id="53" type="text/x-typescript">
     const toScene = (x, y) => ({
       x: (x / fov[0] - 0.5) * 2 * geom.halfX,
       y: (y / fov[1] - 0.5) * 2 * geom.halfY
     })
   </script>
-  <script id="46" type="text/x-typescript" pinned="">
+  <script id="54" type="text/x-typescript">
     // The specimen does not move while scanning, so draw it once to an offscreen
     // layer and blit that each frame. Thousands of gradient-filled spheres per
     // frame would otherwise dominate everything else.
@@ -664,13 +668,13 @@
       return layer;
     })()
   </script>
-  <script id="47" type="text/x-typescript" pinned="">
+  <script id="55" type="text/x-typescript">
     const probeState = {
       row: Math.round(gpts[0] / 2), col: Math.round(gpts[1] / 2),
       pinned: false, hovering: false
     }
   </script>
-  <script id="48" type="text/x-typescript" pinned="">
+  <script id="56" type="text/x-typescript">
     const pointerRig = (() => {
       // Clamped to the field rather than rejected outside it. Seen at this
       // elevation the specimen plane is nearly edge-on and covers barely a tenth
@@ -717,17 +721,17 @@
       return stage.canvas;
     })()
   </script>
-  <script id="49" type="text/x-typescript" pinned="">
+  <script id="57" type="text/x-typescript">
     const visible = whenVisible(stage.canvas)
   </script>
-  <script id="50" type="text/x-typescript" pinned="">
+  <script id="58" type="text/x-typescript">
     const tick = frames({fps: 30, playing: visible})
   </script>
-  <script id="51" type="text/x-typescript" pinned="">
+  <script id="59" type="text/x-typescript">
     // 24 A of exit wave around the probe.
     const cropWidth = Math.min(gpts[0], gpts[1], 2 * Math.round(12 / sampling[0]))
   </script>
-  <script id="52" type="text/x-typescript" pinned="">
+  <script id="60" type="text/x-typescript">
     // The pattern out to the antialiasing limit, which is as far as it is real.
     //
     // Cropped to an equal *angle* on both axes, not an equal number of pixels.
@@ -742,14 +746,13 @@
       ];
     })()
   </script>
-  <script id="53" type="text/x-typescript" pinned="">
+  <script id="61" type="text/x-typescript">
     const dpCanvas = makeCanvas(patternGpts[0], patternGpts[1], {dpr: 1})
   </script>
-  <script id="54" type="text/x-typescript" pinned="">
+  <script id="62" type="text/x-typescript">
     const exitCanvas = makeCanvas(cropWidth, cropWidth, {dpr: 1}).canvas
   </script>
-
-  <script id="55" type="text/x-typescript" pinned="">
+  <script id="63" type="text/x-typescript">
     // The animation loop. Pinned, so it never displays anything: it only draws
     // into canvases the layout above already owns.
     const frame = (() => {
@@ -1074,11 +1077,5 @@
           : " · idle");
       return started;
     })()
-  </script>
-  <script id="56" type="text/x-typescript">
-    const stemExperiment = display(layout);
-  </script>
-  <script id="57" type="text/x-typescript">
-    const readoutView = display(readout);
   </script>
 </notebook>
