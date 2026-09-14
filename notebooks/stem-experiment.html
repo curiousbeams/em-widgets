@@ -496,12 +496,15 @@
     const budget = qualityBudget({min: 1, max: 32, slowMs: 14, fastMs: 9})
   </script>
   <script id="43" type="text/x-typescript">
-    const sceneWidth = Math.round(Math.max(300, Math.min(400, (width - 30) * 0.42)))
+    // Bounded at both ends: a site's prose column can be 700px and a full-width
+    // one 1300, and the widget should be legible in the first without wasting the
+    // second.
+    const sceneWidth = Math.round(Math.max(300, Math.min(520, (width - 30) * 0.42)))
   </script>
   <script id="44" type="text/x-typescript">
     const stage = scene({
       width: sceneWidth,
-      height: 360,
+      height: Math.round(Math.max(340, sceneWidth * 0.9)),
       hint: "hover to drive the probe · click to pin it"
     })
   </script>
@@ -519,7 +522,7 @@
   </script>
   <script id="46" type="text/x-typescript">
     const panelWidth = Math.round(
-      Math.max(150, Math.min(215, (width - sceneWidth - 36) / 2))
+      Math.max(150, Math.min(300, (width - sceneWidth - 36) / 2))
     )
   </script>
   <script id="47" type="text/x-typescript">
