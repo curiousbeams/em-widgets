@@ -5,6 +5,7 @@ import {fileURLToPath} from "node:url";
 
 import {jchToSrgb, colormap, applyColormap, listColormaps} from "../kit/color.js";
 import {histogramScaling, radialAverage} from "../kit/image.js";
+import {withAlpha} from "../kit/canvas.js";
 
 const read = (name) =>
   JSON.parse(readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), "utf8"));
@@ -77,4 +78,19 @@ test("applyColormap spans the table and writes opaque RGBA", () => {
   assert.deepEqual([...rgba.slice(0, 3)], [...table.slice(0, 3)]);
   assert.deepEqual([...rgba.slice(8, 11)], [...table.slice(255 * 3, 255 * 3 + 3)]);
   assert.equal(rgba[3], 255);
+});
+
+test("withAlpha reopacifies every colour form getComputedStyle returns", () => {
+  // The 2D context ignores `currentColor`, so overlays read the inherited text
+  // colour and tint it. What comes back from `getComputedStyle` varies by
+  // browser, so all three spellings have to work or a dark-mode overlay is
+  // silently drawn in the previous fill colour.
+  assert.equal(withAlpha("rgb(232, 234, 237)", 0.5), "rgba(232,234,237,0.5)");
+  assert.equal(withAlpha("rgba(232, 234, 237, 0.8)", 0.5), "rgba(232,234,237,0.5)");
+  assert.equal(withAlpha("rgb(232 234 237 / 0.8)", 0.5), "rgba(232,234,237,0.5)");
+  assert.equal(withAlpha("#e8eaed", 0.5), "rgba(232,234,237,0.5)");
+  assert.equal(withAlpha("#abc", 1), "rgba(170,187,204,1)");
+  // Anything unparseable stays as it was, so the shape is drawn opaque rather
+  // than not at all.
+  assert.equal(withAlpha("rebeccapurple", 0.5), "rebeccapurple");
 });

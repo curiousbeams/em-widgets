@@ -137,6 +137,36 @@ export function currentColor(element, fallback = "#000") {
 }
 
 /**
+ * The same colour at a different opacity.
+ *
+ * Pairs with {@link currentColor}: the inherited text colour is opaque, and an
+ * overlay usually wants it at a fraction of that. `globalAlpha` would do for a
+ * single shape, but not when a path has to be drawn at one opacity over a
+ * background drawn at another.
+ *
+ * Accepts what `getComputedStyle` returns (`rgb(...)` / `rgba(...)`, including
+ * the space-separated form) and plain hex. Anything else is passed through, so
+ * a named colour degrades to opaque rather than to nothing.
+ *
+ * @param {string} color
+ * @param {number} alpha 0 to 1
+ */
+export function withAlpha(color, alpha) {
+  const functional = /^rgba?\(([^)]+)\)/i.exec(color);
+  if (functional) {
+    const [r, g, b] = functional[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color);
+  if (hex) {
+    const full = hex[1].length === 3 ? hex[1].replace(/./g, (c) => c + c) : hex[1];
+    const n = parseInt(full, 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  }
+  return color;
+}
+
+/**
  * Draw a 2D displacement/vector field as arrows on a transparent canvas.
  *
  * Arrows are scaled so the largest one spans roughly one sampling step, which

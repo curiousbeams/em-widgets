@@ -1,0 +1,346 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Paraxial ray optics</title>
+  <script id="1" type="text/markdown">
+    # Where a focal length comes from
+  </script>
+  <script id="2" type="text/markdown">
+    A real electron lens is a field spread over centimetres rather than a single
+    plane. Its focal length comes out of integrating a ray through that field.
+
+    Two bundles of rays are drawn. The **blue** rays arrive parallel to the axis.
+    They cross the axis at the focal plane, which does not depend on where the
+    object is. The **orange** rays leave a single point on the axis, marked as
+    the **object plane**. They meet again at the image plane, and how far
+    off-axis they land there gives the magnification.
+
+    Slide the object towards the lens. The image moves further away and the
+    magnification grows. Once the object crosses the focal plane there is no real
+    image.
+
+    Both bundles are scalings of the same two solutions of the paraxial ray
+    equation, so every ray in the field can be written as
+
+    ${tex.block`r(z) = r_0\,g(z) + r_0'\,h(z).`}
+
+    The **grey** marker shows where a thin lens of the same integrated strength
+    would focus. As the lens is wound up, the real focal plane pulls away from
+    it. That gap measures how thick the lens is.
+  </script>
+  <script id="3" type="text/x-typescript">
+    const paraxialRays = display(layout);
+  </script>
+  <script id="4" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="5" type="text/x-typescript">
+    import {
+      schiskeField, glaserField, sampleAt, integrateRay, firstZero,
+      imagingProperties, thinLensPower,
+      controls as gridControls, row, column, badge, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="6" type="text/x-typescript">
+    // Two lenses, two chapters' worth of parameters. They work at very
+    // different scales. The Einzel lens is metres long at 5 V and the magnetic
+    // one centimetres at 1 kV, so each carries its own span and its own slider
+    // ranges.
+    const LENSES = {
+      "electrostatic (Schiske)": {
+        defaults: {a: 0.025, k: 1 / Math.SQRT2, phi0: 5},
+        span: {z0: -0.5, z1: 1.0},
+        strength: {key: "k", label: "strength k", range: [0.25, 0.95], step: 0.01},
+        build: ({a, k, phi0}) => schiskeField({a, k, phi0}),
+        profile: (f) => (z) => f.phi(z) / f.phi0,
+        profileLabel: "Φ(z) / Φ₀",
+        baseline: 1
+      },
+      "magnetic (Glaser)": {
+        defaults: {a: 0.0075, B0: 0.01, phi0: 1000},
+        span: {z0: -0.1, z1: 0.1},
+        strength: {key: "B0", label: "peak field B₀ (T)", range: [0.004, 0.02], step: 0.0005},
+        build: ({a, B0, phi0}) => glaserField({a, B0, phi0}),
+        profile: (f) => (z) => f.B(z) / f.B0,
+        profileLabel: "B(z) / B₀",
+        baseline: 0
+      }
+    }
+  </script>
+  <script id="7" type="text/x-typescript">
+    const kindFields = gridControls(
+      Inputs.form({
+        kind: Inputs.radio(Object.keys(LENSES), {value: "magnetic (Glaser)", label: "lens"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="8" type="text/x-typescript">
+    const kindControls = Generators.input(kindFields)
+  </script>
+  <script id="9" type="text/x-typescript">
+    const lensSpec = LENSES[kindControls.kind]
+  </script>
+  <script id="10" type="text/x-typescript">
+    // Rebuilt when the lens changes, because the two lenses do not share a
+    // strength parameter. One has a dimensionless k and the other a field in
+    // tesla.
+    const lensFields = (() => {
+      const {defaults, strength, span} = lensSpec;
+      const mm = (v) => v * 1e3;
+      return gridControls(
+        Inputs.form({
+          a: Inputs.range([mm(defaults.a) / 4, mm(defaults.a) * 3], {
+            value: mm(defaults.a), step: mm(defaults.a) / 100, label: "half-width a (mm)"
+          }),
+          [strength.key]: Inputs.range(strength.range, {
+            value: defaults[strength.key], step: strength.step, label: strength.label
+          }),
+          objectPlane: Inputs.range([mm(span.z0), mm(span.z0) / 6], {
+            value: mm(span.z0), step: Math.abs(mm(span.z0)) / 200, label: "object plane (mm)"
+          }),
+          zEnd: Inputs.range([mm(span.z1) / 2, mm(span.z1) * 8], {
+            value: mm(span.z1), step: mm(span.z1) / 40, label: "z range (mm)"
+          })
+        }),
+        {columns: 1, minWidth: 0, compact: true}
+      );
+    })()
+  </script>
+  <script id="11" type="text/x-typescript">
+    const lens = Generators.input(lensFields)
+  </script>
+
+  <script id="12" type="text/x-typescript">
+    const field = lensSpec.build({
+      ...lensSpec.defaults,
+      a: lens.a * 1e-3,
+      [lensSpec.strength.key]: lens[lensSpec.strength.key]
+    })
+  </script>
+  <script id="12b" type="text/x-typescript">
+    // Integrated over a window fixed to the lens rather than to the plot. The
+    // restoring coefficient is localised around the lens, and the span below is
+    // derived from this number, so it must not depend on the span in turn.
+    const lensPower = thinLensPower(field, {z0: -60 * field.a, z1: 60 * field.a})
+  </script>
+  <script id="12c" type="text/x-typescript">
+    const objectPlane = lens.objectPlane * 1e-3
+  </script>
+  <script id="12d" type="text/x-typescript">
+    // The real focal length, from a fixed generous window, computed before the
+    // plot's own span is chosen. The span below needs a focal length to predict
+    // where the image lands. The thin-lens value runs about 20% short here,
+    // which is enough to put the image just outside the frame.
+    const focalLength = (() => {
+      const probe = integrateRay(field, {
+        z0: lensSpec.span.z0, z1: lensSpec.span.z1 * 8, steps: 8000, r0: 1, rp0: 0
+      });
+      return firstZero(probe, {after: 0}) ?? (lensPower > 0 ? 1 / lensPower : Infinity);
+    })()
+  </script>
+  <script id="13" type="text/x-typescript">
+    // Both edges of the frame are set by the reader and neither moves on its
+    // own. An earlier version sized the right edge automatically to keep the
+    // image in view, which made the axis jump whenever the object moved.
+    const span = (() => {
+      const z0 = lensSpec.span.z0;
+      const z1 = lens.zEnd * 1e-3;
+      // Steps follow the range, so widening the view does not quietly coarsen
+      // the integration and move the focal plane.
+      const steps = Math.min(16000, Math.max(2000,
+        Math.round((4000 * (z1 - z0)) / (lensSpec.span.z1 - lensSpec.span.z0))));
+      return {z0, z1, steps};
+    })()
+  </script>
+  <script id="14" type="text/x-typescript">
+    const solution = imagingProperties(field, span, {objectPlane})
+  </script>
+  <script id="15" type="text/x-typescript">
+    // What a thin lens of the same integrated strength would do. Measured from
+    // the lens centre, which is the approximation's own reference plane.
+    const thinLens = {power: lensPower, focal: lensPower > 0 ? 1 / lensPower : null}
+  </script>
+
+  <script id="16" type="text/x-typescript">
+    // Sub-sampled for drawing. 4000 integration steps give an accurate focal
+    // plane, but far more points than an SVG path needs.
+    //
+    // `scale` turns an abstract solution into a drawable ray. g is dimensionless
+    // and h has units of length per unit slope, so plotting the two directly
+    // would put them on axes three orders of magnitude apart. The first version
+    // of this ended up with a ±1500 mm axis.
+    const toSeries = (ray, scale, every = 8) => {
+      const out = [];
+      for (let i = 0; i < ray.z.length; i += every) {
+        out.push({z: ray.z[i] * 1e3, r: ray.r[i] * scale * 1e3});
+      }
+      return out;
+    }
+  </script>
+  <script id="16b" type="text/x-typescript">
+    // Two fans, each a set of scalings of one solution. The first is parallel
+    // rays at a range of heights, the second rays from one object point at a
+    // range of angles. Both are sized to about a millimetre at the lens so they
+    // can share an axis.
+    const bundles = (() => {
+      const {g, h} = solution;
+      const height = 1e-3;                       // 1 mm in, for the parallel fan
+      const atLens = Math.abs(sampleAt(h, 0)) || 1e-6;
+      const angle = height / atLens;             // so the point-source fan also reaches ~1 mm
+      // h starts at the object plane, so its fan begins partway across the
+      // frame. That is what the object slider changes.
+
+      const fractions = [1, 0.55];
+      const parallel = fractions.flatMap((f) => [f, -f]).map((f) => toSeries(g, height * f));
+      const point = fractions.flatMap((f) => [f, -f]).map((f) => toSeries(h, angle * f));
+      return {parallel, point};
+    })()
+  </script>
+  <script id="17" type="text/x-typescript">
+    const plotWidth = Math.max(320, Math.min(720, width - 300))
+  </script>
+  <script id="18" type="text/x-typescript">
+    const zDomain = [span.z0 * 1e3, span.z1 * 1e3]
+  </script>
+  <script id="19" type="text/x-typescript">
+    const fieldPlot = (() => {
+      const profile = lensSpec.profile(field);
+      const pts = [];
+      for (let i = 0; i <= 400; i++) {
+        const z = span.z0 + ((span.z1 - span.z0) * i) / 400;
+        pts.push({z: z * 1e3, v: profile(z)});
+      }
+      // Shaded from the far-field value rather than from zero. The Einzel lens
+      // is a dip in a potential that is 1 everywhere else, so filling under the
+      // curve would paint the whole panel and hide the dip.
+      const {baseline} = lensSpec;
+      const lo = Math.min(baseline, ...pts.map((d) => d.v));
+      const hi = Math.max(baseline, ...pts.map((d) => d.v));
+      const pad = (hi - lo) * 0.15 || 0.1;
+
+      return Plot.plot({
+        width: plotWidth, height: 110,
+        marginLeft: 52, marginRight: 12, marginTop: 8, marginBottom: 4,
+        x: {domain: zDomain, axis: null},
+        y: {
+          domain: [lo - pad, hi + pad],
+          label: lensSpec.profileLabel, labelAnchor: "center", ticks: 3
+        },
+        marks: [
+          Plot.areaY(pts, {x: "z", y1: baseline, y2: "v", fillOpacity: 0.14, fill: UI.accent}),
+          Plot.line(pts, {x: "z", y: "v", stroke: UI.accent, strokeWidth: 1.5}),
+          Plot.ruleY([baseline], {strokeOpacity: 0.3})
+        ]
+      });
+    })()
+  </script>
+  <script id="20" type="text/x-typescript">
+    const rayPlot = (() => {
+      const {focalPlane, imagePlane} = solution;
+      const marks = [
+        // The lens itself, as the band where the field is at least half-strength.
+        Plot.rectY([{x1: -field.a * 1e3, x2: field.a * 1e3}], {
+          x1: "x1", x2: "x2", y1: -1e4, y2: 1e4,
+          fill: UI.accent, fillOpacity: 0.07
+        }),
+        Plot.ruleY([0], {strokeOpacity: 0.35}),
+        ...bundles.parallel.map((s) =>
+          Plot.line(s, {x: "z", y: "r", stroke: UI.accent, strokeWidth: 1.4, strokeOpacity: 0.85})),
+        ...bundles.point.map((s) =>
+          Plot.line(s, {x: "z", y: "r", stroke: "#e8833a", strokeWidth: 1.4, strokeOpacity: 0.85}))
+      ];
+
+      // Labels are stacked rather than all sitting on the axis. The focal plane
+      // and the thin-lens estimate are millimetres apart when the lens is weak,
+      // so their labels would otherwise overlap.
+      const label = (z, text, colour, dash, dy) => [
+        Plot.ruleX([z * 1e3], {stroke: colour, strokeWidth: 1.2, strokeDasharray: dash, strokeOpacity: 0.8}),
+        Plot.text([{z: z * 1e3, text}], {
+          x: "z", frameAnchor: "top", text: "text", dy, dx: 4,
+          fill: colour, fontSize: 10, textAnchor: "start"
+        })
+      ];
+      marks.push(...label(objectPlane, "object", "#e8833a", "2,3", -2));
+      if (focalPlane !== null) marks.push(...label(focalPlane, "focal", UI.accent, null, 12));
+      if (thinLens.focal !== null && thinLens.focal * 1e3 < zDomain[1]) {
+        marks.push(...label(thinLens.focal, "thin lens", "#999", "3,3", 26));
+      }
+      if (imagePlane !== null) marks.push(...label(imagePlane, "image", "#e8833a", null, 40));
+
+      // Clipped to a few times the entering height. Past the image plane the
+      // rays diverge without limit and would squash everything else flat.
+      let extent = 0;
+      for (const series of [...bundles.parallel, ...bundles.point]) {
+        for (const p of series) extent = Math.max(extent, Math.abs(p.r));
+      }
+      extent = Math.min(extent, 3.5);
+
+      return Plot.plot({
+        width: plotWidth, height: 300,
+        marginLeft: 52, marginRight: 12, marginTop: 8, marginBottom: 34,
+        x: {domain: zDomain, label: "z (mm)"},
+        y: {domain: [-extent * 1.1, extent * 1.1], label: "r (mm)", labelAnchor: "center"},
+        marks
+      });
+    })()
+  </script>
+
+  <script id="21" type="text/x-typescript">
+    const legend = htl.html`<div style="font-size:11px; display:flex; gap:14px; flex-wrap:wrap;
+      color:var(--theme-foreground-muted, inherit); margin: 2px 0 6px;">
+      <span><b style="color:${UI.accent}">——</b> parallel in → focal plane</span>
+      <span><b style="color:#e8833a">——</b> from the object point → image plane</span>
+      <span><b style="color:#999">– –</b> thin-lens focus</span>
+    </div>`
+  </script>
+  <script id="22" type="text/x-typescript">
+    const plotHost = htl.html`<div></div>`
+  </script>
+  <script id="23" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="24" type="text/x-typescript">
+    const layout = (() => {
+      const left = column([kindFields, lensFields], {align: "stretch"});
+      left.style.flex = "0 0 auto";
+      left.style.width = "240px";
+      const right = column([legend, plotHost], {align: "stretch"});
+      right.style.flex = "0 0 auto";
+      return row([left, right]);
+    })()
+  </script>
+  <script id="25" type="text/x-typescript">
+    // Plot returns a fresh SVG each time, so the host is emptied and refilled
+    // rather than mutated. This runs when a control moves, not on every
+    // animation frame.
+    const draw = (() => {
+      plotHost.replaceChildren(fieldPlot, rayPlot);
+
+      const mm = (v) => (v === null || v === undefined ? "—" : `${(v * 1e3).toFixed(1)} mm`);
+      const {focalPlane, imagePlane, magnification} = solution;
+
+      // There are three cases. An object closer to the lens than the focal
+      // length forms a virtual image, and the marginal ray never crosses back.
+      // An object just outside the focal length forms a real image so far away
+      // that the integration ends first. Both used to print the same bare em
+      // dash, which made the second look like a bug.
+      const u = -objectPlane;
+      let imageText;
+      if (imagePlane !== null) {
+        imageText =
+          `image plane ${mm(imagePlane)} · magnification ` +
+          `${magnification === null ? "—" : magnification.toFixed(2)}×`;
+      } else if (u < focalLength) {
+        imageText = "virtual image — the object is nearer than the focal length";
+      } else {
+        imageText = "the image is past the end of the z range — widen it to find it";
+      }
+
+      readout.textContent =
+        `focal plane ${mm(focalPlane)} · thin lens ${mm(thinLens.focal)} · ${imageText}`;
+      return focalPlane;
+    })()
+  </script>
+</notebook>

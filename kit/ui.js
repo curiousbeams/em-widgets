@@ -99,8 +99,14 @@ const STYLES = `
   display: block; width: auto; padding: 0; margin: 0 0 1px;
   color: var(--theme-foreground-muted, inherit);
 }
+/* Wrapping matters for radios. A slider's row is one range plus one number and
+   always fits, but a radio's row is one label per option and will happily run
+   past the end of a 240px control column and over whatever is beside it —
+   which for a canvas that handles its own pointer events means the options
+   underneath stop being clickable. */
 .em-controls--compact form[class^="inputs-"] > div {
   display: flex; gap: 5px; align-items: center; width: auto;
+  flex-wrap: wrap; min-width: 0; max-width: 100%;
 }
 .em-controls--compact form[class^="inputs-"] input[type=range] {
   flex: 1 1 auto; min-width: 0; width: auto;

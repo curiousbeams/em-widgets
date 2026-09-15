@@ -39,6 +39,8 @@
         <option value="../notebooks/aperture-autocorrelation.html">aperture-autocorrelation</option>
         <option value="../notebooks/stem-measurements.html">stem-measurements (zarr data)</option>
         <option value="../notebooks/stem-experiment.html">stem-experiment (3D scene)</option>
+        <option value="../notebooks/paraxial-rays.html">paraxial-rays</option>
+        <option value="../notebooks/non-paraxial-rays.html">non-paraxial-rays (3D scene)</option>
       </select>
       <label><input type="checkbox" id="dark" /> dark</label>
       <button id="reload">reload</button>
@@ -102,13 +104,48 @@
         cleanup = await widget.render({model, el});
       }
 
-      picker.addEventListener("change", mount);
-      document.getElementById("reload").addEventListener("click", mount);
-      darkToggle.addEventListener("change", () => {
+      // Reloading the page, rather than remounting.
+      //
+      // A remount re-runs `import()` on the same kit URLs, and a document's
+      // module registry is keyed by URL and never re-evaluated — so an edited
+      // `kit/` file is not picked up and the widget fails against the version
+      // that was loaded first. A query string does not help either: busting
+      // `kit/index.js?v=2` still lets its own `export * from "./canvas.js"`
+      // resolve to the cached `kit/canvas.js`. Only a new document clears it.
+      //
+      // The selection lives in the hash so it survives the reload.
+      function readState() {
+        const params = new URLSearchParams(location.hash.slice(1));
+        if (params.has("nb")) picker.value = params.get("nb");
+        darkToggle.checked = params.get("dark") === "1";
+        applyDark();
+      }
+      function writeState() {
+        const params = new URLSearchParams();
+        params.set("nb", picker.value);
+        if (darkToggle.checked) params.set("dark", "1");
+        location.hash = params.toString();
+      }
+      function applyDark() {
         document.documentElement.classList.toggle("dark", darkToggle.checked);
         document.documentElement.dataset.theme = darkToggle.checked ? "dark" : "light";
+      }
+
+      picker.addEventListener("change", () => {
+        writeState();
+        location.reload();
+      });
+      document.getElementById("reload").addEventListener("click", () => {
+        writeState();
+        location.reload();
+      });
+      // The theme is CSS only, so it needs no reload.
+      darkToggle.addEventListener("change", () => {
+        applyDark();
+        writeState();
       });
 
+      readState();
       mount();
     </script>
   </body>

@@ -1,0 +1,843 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Non-paraxial ray tracing</title>
+  <script id="1" type="text/markdown">
+    # Larmor rotation and spherical aberration
+  </script>
+  <script id="2" type="text/markdown">
+    The paraxial ray equation uses the symmetry of a round lens to reduce the
+    problem to one radial coordinate. Two things disappear when it does.
+
+    A magnetic lens focuses in a frame that rotates about the optic axis, and
+    the radial equation works entirely inside that frame. Keeping x and y
+    separate puts the rotation back, and the rays become helices. **Drag the
+    scene** to turn it and see them.
+
+    The paraxial equation is also linear in the ray's distance from the axis, so
+    every ray is focused to the same plane no matter how far out it starts.
+    Expanding the off-axis field to higher order restores the dependence, and
+    rays further from the axis cross earlier. That is spherical aberration. The
+    **expansion order** control switches between the linearised equations and
+    the full ones. Set it to *paraxial* and the spot in the inset collapses to a
+    point. Set it back to *order 3* and it opens into a disc.
+
+    The thin blue marker is the **Gaussian image plane**, where the linearised
+    equations say every ray should meet. The dashed orange ring is the
+    **detector**, placed where the bundle is actually narrowest. Aberration
+    separates the two.
+
+    Each colour is one cone angle. The two lenses behave differently: the
+    electrostatic lens picks up its aberration only at order 2 and above, while
+    the magnetic one has most of it at order 1, because there the cubic term
+    comes from the longitudinal field multiplying a ray slope.
+  </script>
+  <script id="3" type="text/x-typescript">
+    const nonParaxialRays = display(layout);
+  </script>
+  <script id="4" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="5" type="text/x-typescript">
+    import {
+      schiskeField, glaserField,
+      equationsOfMotion, traceRay3D, coneOfRays, larmorAngle, axialCrossing,
+      spotDiagram, memoiseDerivatives,
+      makeView, project, scene, row, column, badge, colormap,
+      currentColor, withAlpha, controls as gridControls, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="6" type="text/x-typescript">
+    // The two lenses of the chapter, at its own parameters. `maxAngle` is where
+    // the order-3 expansion stops being trustworthy for each: past 20 mrad the
+    // Schiske rays leave the region the expansion converges in, and the traces
+    // blow up rather than focus.
+    const LENSES = {
+      "electrostatic (Schiske)": {
+        key: "electrostatic",
+        build: () => schiskeField({a: 0.025, k: 1 / Math.SQRT2, phi0: 5}),
+        phi0: 5,
+        span: {z0: -0.5, z1: 1.0},
+        maxAngle: 20,
+        // Chosen so that at the middle of the cone-angle range the defocused
+        // spot and the aberration disc are comparable in size. Much wider and
+        // the inset is all defocus blur with the aberration a dot in the
+        // middle; much narrower and the slider does nothing visible.
+        defocusRange: 30
+      },
+      "magnetic (Glaser)": {
+        key: "magnetic",
+        build: () => glaserField({a: 0.0075, B0: 0.01, phi0: 1000}),
+        phi0: 1000,
+        span: {z0: -0.1, z1: 0.1},
+        maxAngle: 40,
+        defocusRange: 2
+      }
+    }
+  </script>
+  <script id="7" type="text/x-typescript">
+    // Labelled just "1", "2", "3" rather than "order 1" and so on. The four
+    // long options did not fit the 240px control column and the last one
+    // overhung the canvas, which handles its own pointer events and so swallowed
+    // the click.
+    //
+    // A Map, not an object. Object keys that look like integers are iterated
+    // first and in numeric order whatever order they were written in, so a
+    // plain object put the radio buttons in the order 1, 2, 3, paraxial.
+    const ORDERS = new Map([
+      ["paraxial", {order: 1, paraxial: true}],
+      ["1", {order: 1}],
+      ["2", {order: 2}],
+      ["3", {order: 3}]
+    ])
+  </script>
+
+  <!-- Controls split in two. Everything above changes the trajectories and so
+       has to run through the reactive graph; everything below only changes how
+       they are drawn, and is wired straight to a repaint instead. -->
+  <script id="8" type="text/x-typescript">
+    const traceFields = gridControls(
+      Inputs.form({
+        kind: Inputs.radio(Object.keys(LENSES), {value: "magnetic (Glaser)", label: "lens"}),
+        expansion: Inputs.radio([...ORDERS.keys()], {value: "3", label: "expansion order"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="9" type="text/x-typescript">
+    const traceControls = Generators.input(traceFields)
+  </script>
+  <script id="10" type="text/x-typescript">
+    const lensSpec = LENSES[traceControls.kind]
+  </script>
+  <script id="11" type="text/x-typescript">
+    // Rebuilt per lens, because the angle ranges differ by a factor of two
+    // between them.
+    const coneFields = (() => {
+      const {maxAngle} = lensSpec;
+      return gridControls(
+        Inputs.form({
+          angle: Inputs.range([maxAngle / 10, maxAngle], {
+            value: maxAngle / 2, step: maxAngle / 40, label: "cone angle (mrad)"
+          }),
+          shells: Inputs.range([1, 4], {value: 3, step: 1, label: "cone shells"}),
+          azimuthal: Inputs.range([6, 32], {value: 12, step: 2, label: "rays per shell"})
+        }),
+        {columns: 1, minWidth: 0, compact: true}
+      );
+    })()
+  </script>
+  <script id="12" type="text/x-typescript">
+    const cone = Generators.input(coneFields)
+  </script>
+  <script id="13" type="text/x-typescript">
+    // Not read with `Generators.input`. These two only move the camera and
+    // resample trajectories that have already been integrated, so putting them
+    // in the reactive graph would re-trace the whole bundle on every pixel of
+    // slider travel. The listener cell below wires them to a repaint.
+    const viewFields = (() => {
+      const {defocusRange} = lensSpec;
+      return gridControls(
+        Inputs.form({
+          // The step divides the range evenly so that zero is on the grid. With
+          // a step that does not, the slider cannot be returned to the waist
+          // and the readout shows a defocus of 2e-16 mm.
+          // Measured from the waist, which is where the detector sits, so zero
+          // always means "on the detector" whatever the expansion order is
+          // doing. Referencing it to the Gaussian plane instead would have the
+          // detector start off-centre by the aberration shift.
+          defocus: Inputs.range([-defocusRange, defocusRange], {
+            value: 0, step: defocusRange / 20, label: "defocus from waist (mm)"
+          }),
+          // Negative only, and never shallower than 20 degrees. The azimuth
+          // below tilts the optic axis on screen by an amount that grows with
+          // the tilt, lifting the left-hand end of the column and keeping the
+          // bottom-left corner clear for the inset.
+          elevation: Inputs.range([-60, -20], {value: -35, step: 1, label: "tilt (°)"})
+        }),
+        {columns: 1, minWidth: 0, compact: true}
+      );
+    })()
+  </script>
+
+  <script id="14" type="text/x-typescript">
+    // Mutable view state. Written by the drag rig and the two sliders above,
+    // read by `redraw`. Nothing depends on it reactively, which is what keeps a
+    // drag from re-running the notebook.
+    const viewState = ({roll: 0.6, tilt: -35, defocus: 0})
+  </script>
+  <script id="15" type="text/x-typescript">
+    // Everything `redraw` needs that the physics produces. Filled by the
+    // compute cell. A mutable bag rather than a set of reactive cells so that
+    // `redraw` can be defined once and stay valid.
+    const state = ({ready: false})
+  </script>
+
+  <script id="16" type="text/x-typescript">
+    // Memoised because every ray in the bundle is integrated on the same grid,
+    // so the eight derivatives an order-3 evaluation needs are computed once per
+    // grid point rather than once per ray.
+    const field = memoiseDerivatives(lensSpec.build())
+  </script>
+  <script id="17" type="text/x-typescript">
+    const span = {...lensSpec.span, steps: 900}
+  </script>
+  <script id="18" type="text/x-typescript">
+    const system = equationsOfMotion({
+      [lensSpec.key]: field, phi0: lensSpec.phi0, ...ORDERS.get(traceControls.expansion)
+    })
+  </script>
+  <script id="19" type="text/x-typescript">
+    // The Gaussian image plane, from the linearised system at an angle small
+    // enough that no aberration reaches it. It depends on the lens alone, so it
+    // holds still while the cone and the expansion order change, which is what
+    // makes the shift readable.
+    const gaussianPlane = (() => {
+      const linear = equationsOfMotion({
+        [lensSpec.key]: field, phi0: lensSpec.phi0, order: 1, paraxial: true
+      });
+      const probe = traceRay3D(linear, {...span, steps: 4000, xp0: 1e-4});
+      return axialCrossing(probe, {after: 0})?.z ?? null;
+    })()
+  </script>
+  <script id="20" type="text/x-typescript">
+    const rays = coneOfRays({
+      azimuthal: cone.azimuthal,
+      shells: cone.shells,
+      minAngle: (cone.angle * 1e-3) / cone.shells,
+      maxAngle: cone.angle * 1e-3
+    }).map((start) => ({
+      ...traceRay3D(system, {...span, ...start}),
+      shell: start.shell,
+      angle: start.angle
+    }))
+  </script>
+  <script id="21" type="text/x-typescript">
+    const rmsRadius = (bundle, at) => {
+      const sampled = spotDiagram(bundle, at);
+      let sum = 0;
+      for (const s of sampled) sum += s.x * s.x + s.y * s.y;
+      return Math.sqrt(sum / sampled.length);
+    }
+  </script>
+  <script id="22" type="text/x-typescript">
+    // The plane of least confusion: where the bundle is narrowest, rather than
+    // where the linearised equations say it should be. With aberration the two
+    // differ, and the Gaussian plane is the wrong place to put a detector —
+    // the rays there have already crossed and spread again.
+    //
+    // Searched between the marginal ray's crossing and the Gaussian plane,
+    // which for a converging lens brackets the waist, with a coarse scan for
+    // the basin and a golden section inside it. Resampling an already traced
+    // bundle is interpolation only, so a few hundred evaluations cost nothing.
+    const findWaist = (bundle, gaussian) => {
+      if (gaussian === null) return null;
+      const marginal = axialCrossing(bundle.at(-1), {after: 0})?.z ?? gaussian;
+      const pad = 0.3 * Math.abs(gaussian - marginal) + 0.004 * (span.z1 - span.z0);
+      let lo = Math.min(gaussian, marginal) - pad;
+      let hi = Math.max(gaussian, marginal) + pad;
+
+      let best = gaussian;
+      let bestValue = Infinity;
+      const COARSE = 160;
+      for (let i = 0; i <= COARSE; i++) {
+        const z = lo + ((hi - lo) * i) / COARSE;
+        const v = rmsRadius(bundle, z);
+        if (v < bestValue) { bestValue = v; best = z; }
+      }
+
+      const step = (hi - lo) / COARSE;
+      lo = best - step;
+      hi = best + step;
+      const phi = (Math.sqrt(5) - 1) / 2;
+      let a = hi - phi * (hi - lo);
+      let b = lo + phi * (hi - lo);
+      let fa = rmsRadius(bundle, a);
+      let fb = rmsRadius(bundle, b);
+      for (let i = 0; i < 40; i++) {
+        if (fa < fb) { hi = b; b = a; fb = fa; a = hi - phi * (hi - lo); fa = rmsRadius(bundle, a); }
+        else { lo = a; a = b; fa = fb; b = lo + phi * (hi - lo); fb = rmsRadius(bundle, b); }
+      }
+      return (lo + hi) / 2;
+    }
+  </script>
+  <script id="22b" type="text/x-typescript">
+    const waistPlane = findWaist(rays, gaussianPlane)
+  </script>
+  <script id="23" type="text/x-typescript">
+    // A reference radius for the inset: how big the aberration disc is at the
+    // full order-3 expansion, whichever expansion is actually selected.
+    //
+    // Without it the inset scaled itself to whatever it was showing, so
+    // switching to `paraxial` shrank the disc five hundredfold and redrew it at
+    // exactly the same size. The collapse is the point of the control, so the
+    // frame has to stay where the aberrated bundle put it.
+    //
+    // It needs its own waist as well as its own rays. Sampling order-3 rays at
+    // the *selected* expansion's waist mixed the two: with the Schiske lens on
+    // `paraxial` the waist is the Gaussian plane, 340 mm beyond where the
+    // order-3 rays cross, and they have diverged to centimetres by then. The
+    // inset asked for a 1 cm frame and drew the spot as a dot in the middle.
+    //
+    // Three angles, because a disc needs more than one — a single ray crosses
+    // the axis and its own minimum radius is zero. They are the same three
+    // angles the drawn bundle uses at the default shell count, so they bound it.
+    //
+    // The reach is measured at both ends of the defocus slider as well as at
+    // the waist, rather than estimated as `cone angle x defocus`. That estimate
+    // is the object-side angle, and the rays leave the lens at a different one:
+    // for the Glaser lens at 4 mrad it came out a third short and the spot ran
+    // outside the frame at full defocus.
+    const spotReach = (() => {
+      if (gaussianPlane === null) return 0;
+      const full = equationsOfMotion({
+        [lensSpec.key]: field, phi0: lensSpec.phi0, order: 3
+      });
+      const outer = cone.angle * 1e-3;
+      const probes = [outer / 3, (2 * outer) / 3, outer]
+        .map((angle) => traceRay3D(full, {...span, xp0: angle}));
+      const waist = findWaist(probes, gaussianPlane);
+      const range = lensSpec.defocusRange * 1e-3;
+
+      let reach = 0;
+      for (const offset of [-range, 0, range]) {
+        const plane = Math.min(span.z1, Math.max(span.z0, waist + offset));
+        for (const spot of spotDiagram(probes, plane)) {
+          reach = Math.max(reach, Math.hypot(spot.x, spot.y));
+        }
+      }
+      return reach;
+    })()
+  </script>
+  <script id="24" type="text/x-typescript">
+    // Only meaningful for a magnetic lens; an electrostatic one does not rotate
+    // the image at all.
+    const rotation = lensSpec.key === "magnetic"
+      ? larmorAngle(field, span).theta.at(-1)
+      : 0
+  </script>
+
+  <script id="25" type="text/x-typescript">
+    const stageWidth = Math.max(340, Math.min(660, width - 300))
+  </script>
+  <script id="26" type="text/x-typescript">
+    const stage = scene({
+      width: stageWidth,
+      height: Math.round(stageWidth * 0.66),
+      hint: "drag to turn the scene about the optic axis",
+      cursor: "grab"
+    })
+  </script>
+  <script id="27" type="text/x-typescript">
+    const legendHost = htl.html`<div style="font-size:11px; display:flex; gap:14px;
+      flex-wrap:wrap; color:var(--theme-foreground-muted, inherit); margin: 2px 0 6px;
+      min-height: 15px;"></div>`
+  </script>
+  <script id="28" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="29" type="text/x-typescript">
+    // Depends only on elements that are built once per lens, never on a slider
+    // value. An earlier version had the legend depend on the cone controls, so
+    // `layout` was rebuilt on every input event and the slider being dragged
+    // was torn out of the DOM and reinserted — which is why the sliders would
+    // only move one step at a time.
+    const layout = (() => {
+      const left = column([traceFields, coneFields, viewFields], {align: "stretch"});
+      left.style.flex = "0 0 auto";
+      left.style.width = "240px";
+      const right = column([legendHost, stage.node], {align: "stretch"});
+      right.style.flex = "0 0 auto";
+      return row([left, right]);
+    })()
+  </script>
+
+  <script id="30" type="text/x-typescript">
+    // Scene coordinates. The optic axis runs left to right, so it is passed as
+    // `project`'s x. The roll is applied here rather than through the camera's
+    // azimuth, which rotates the other two axes.
+    const toScene = (za, rx, ry) => {
+      const {z0, z1, rMax, aspect} = state.geometry;
+      const u = (((za - z0) / (z1 - z0)) - 0.5) * 2 * aspect;
+      const vx = rx / rMax;
+      const vy = ry / rMax;
+      const c = Math.cos(viewState.roll);
+      const s = Math.sin(viewState.roll);
+      return [u, vx * s + vy * c, vx * c - vy * s];
+    }
+  </script>
+  <script id="31" type="text/x-typescript">
+    // The azimuth matters more than it looks. `project` takes its x straight to
+    // screen x, so with the optic axis on x and no azimuth, every transverse
+    // circle has a single screen x and collapses to a vertical line. Depth then
+    // only tints the picture and the scene reads as flat however far it is
+    // tilted. A modest azimuth swings the axis out of the screen plane, which
+    // opens those circles into ellipses and gives the box a third dimension.
+    const AZIMUTH = 14
+  </script>
+  <script id="32" type="text/x-typescript">
+    const makeCamera = () => makeView(
+      AZIMUTH, viewState.tilt,
+      Math.min((stage.width * 0.44) / state.geometry.aspect, stage.height * 0.30),
+      stage.width / 2,
+      // Lifted, because the inset takes the bottom-left corner and the tilted
+      // axis puts the interesting end of the column low and right.
+      stage.height * 0.40,
+      // Orthographic. The box is long and thin, and any perspective on it reads
+      // as the optic axis tapering rather than as depth.
+      0
+    )
+  </script>
+
+  <script id="33" type="text/x-typescript">
+    const drawScene = (camera) => {
+      const {ctx, width: W, height: H} = stage;
+      const {rMax, z0, z1} = state.geometry;
+
+      // `cue` is the transverse part of the depth, separated out because the
+      // full depth also runs along the optic axis once the camera has an
+      // azimuth. Ordering and shading by the full depth would make the far end
+      // of the column systematically paler than the near end, which reads as
+      // fog rather than as one side of a helix being nearer than the other.
+      const at = (za, rx, ry) => {
+        const scenePoint = toScene(za, rx, ry);
+        const p = project(...scenePoint, camera);
+        p.cue = scenePoint[1] * camera.ca * camera.ce - scenePoint[2] * camera.se;
+        return p;
+      };
+
+      // Optic axis.
+      const {tint} = state;
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = tint(0.45);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const head = at(z0, 0, 0);
+      const tail = at(z1, 0, 0);
+      ctx.moveTo(head.sx, head.sy);
+      ctx.lineTo(tail.sx, tail.sy);
+      ctx.stroke();
+      ctx.restore();
+
+      // A circle in the transverse plane at one axial position.
+      const circle = (za, radius, style, dash, lineWidth = 1) => {
+        ctx.save();
+        if (dash) ctx.setLineDash(dash);
+        ctx.strokeStyle = style;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        for (let i = 0; i <= 64; i++) {
+          const phi = (2 * Math.PI * i) / 64;
+          const p = at(za, radius * Math.cos(phi), radius * Math.sin(phi));
+          if (i === 0) ctx.moveTo(p.sx, p.sy);
+          else ctx.lineTo(p.sx, p.sy);
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      // The lens, as three rings across the half-width of its field. The radius
+      // is the bundle's own radius where it arrives, which for rays from a
+      // point source at z0 is just the cone angle times the distance. A ring at
+      // a fixed fraction of the frame made the lens look larger than the beam
+      // it was focusing.
+      //
+      // Drawn in grey rather than in the kit's accent blue, which is reserved
+      // here for the Gaussian image plane. In blue the lens rings were the
+      // brightest thing in the frame and read as the marker they sit furthest
+      // from.
+      const a = state.lensHalfWidth;
+      const bore = Math.min(rMax, state.coneAngle * Math.abs(z0) * 1.15);
+      for (const za of [-a, 0, a]) {
+        circle(za, bore, tint(za === 0 ? 0.4 : 0.2));
+      }
+
+      // Rays, drawn in depth bands so that near segments cover far ones without
+      // sorting and stroking twelve thousand segments one at a time.
+      const every = 4;
+      const BANDS = 28;
+      const shells = state.shells;
+      const banded = Array.from({length: BANDS}, () =>
+        Array.from({length: shells}, () => []));
+      let lo = Infinity;
+      let hi = -Infinity;
+      const projected = state.rays.map((ray) => {
+        const pts = [];
+        for (let i = 0; i < ray.z.length; i += every) {
+          const p = at(ray.z[i], ray.x[i], ray.y[i]);
+          if (p.cue < lo) lo = p.cue;
+          if (p.cue > hi) hi = p.cue;
+          pts.push(p);
+        }
+        return {pts, shell: ray.shell};
+      });
+      const spread = hi - lo || 1;
+      for (const {pts, shell} of projected) {
+        for (let i = 1; i < pts.length; i++) {
+          const cue = (pts[i - 1].cue + pts[i].cue) / 2;
+          const band = Math.min(BANDS - 1,
+            Math.max(0, Math.floor(((cue - lo) / spread) * BANDS)));
+          banded[band][shell].push(pts[i - 1], pts[i]);
+        }
+      }
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(2, 2, W - 4, H - 4);
+      ctx.clip();
+      ctx.lineCap = "round";
+      for (let band = 0; band < BANDS; band++) {
+        // Depth cueing: far segments are thinner and paler, which is what
+        // separates the near and far halves of a helix.
+        const t = band / (BANDS - 1);
+        const alpha = 0.3 + 0.65 * t;
+        ctx.lineWidth = 0.9 + 0.9 * t;
+        for (let shell = 0; shell < shells; shell++) {
+          const segments = banded[band][shell];
+          if (segments.length === 0) continue;
+          ctx.strokeStyle = state.shellColour(shell, alpha);
+          ctx.beginPath();
+          for (let i = 0; i < segments.length; i += 2) {
+            ctx.moveTo(segments[i].sx, segments[i].sy);
+            ctx.lineTo(segments[i + 1].sx, segments[i + 1].sy);
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+
+      // Cross-sections of the outermost shell at a few planes. A helix drawn on
+      // its own can be read as a ray that simply wanders; a sequence of
+      // polygons that are each turned a little further relative to the last
+      // shows the whole bundle rotating together, which is what Larmor rotation
+      // is. Skipped for an electrostatic lens, which does not rotate anything.
+      if (state.rotates && state.rays.length >= 6) {
+        const outer = state.rays.filter((r) => r.shell === shells - 1);
+        const nSections = 7;
+        ctx.save();
+        ctx.lineWidth = 1;
+        for (let s = 0; s < nSections; s++) {
+          const frac = (s + 0.5) / nSections;
+          const index = Math.round(frac * (outer[0].z.length - 1));
+          ctx.strokeStyle = tint(0.2 + 0.2 * Math.sin(Math.PI * frac));
+          ctx.beginPath();
+          outer.forEach((ray, i) => {
+            const p = at(ray.z[index], ray.x[index], ray.y[index]);
+            if (i === 0) ctx.moveTo(p.sx, p.sy);
+            else ctx.lineTo(p.sx, p.sy);
+          });
+          ctx.closePath();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // The Gaussian image plane, thin and solid, and the detector where the
+      // bundle is actually narrowest, dashed. Drawing both is the point: the
+      // gap between them is the aberration.
+      const labels = [];
+      if (state.gaussianPlane !== null) {
+        circle(state.gaussianPlane, rMax * 0.34, "rgba(4,161,205,0.8)", null, 1);
+        labels.push([state.gaussianPlane, "Gaussian image", "rgba(4,161,205,0.95)"]);
+      }
+      circle(state.detectorPlane, rMax * 0.5, "rgba(232,131,58,0.9)", [3, 3], 1.4);
+      labels.push([state.detectorPlane, "detector", "rgba(232,131,58,0.95)"]);
+
+      ctx.save();
+      ctx.font = "11px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      // Labels along the top edge rather than on the axis, where the bundle is
+      // densest and the text was unreadable. The two are staggered so they do
+      // not print on top of each other when the aberration is small.
+      labels.forEach(([za, text, colour], i) => {
+        const p = at(za, 0, 0);
+        ctx.fillStyle = colour;
+        ctx.fillText(text, Math.min(W - 46, Math.max(46, p.sx)), 14 + i * 13);
+      });
+      ctx.restore();
+    }
+  </script>
+
+  <script id="34" type="text/x-typescript">
+    // The spot diagram, as an inset in the bottom-left corner. The tilt is
+    // restricted to negative angles, which slopes the optic axis down to the
+    // right and leaves that corner empty whatever the reader does.
+    const drawInset = () => {
+      const {ctx, height: H} = stage;
+      const size = Math.min(155, stage.width * 0.28, H * 0.46);
+      const pad = 9;
+      const x0 = pad;
+      const y0 = H - pad - size;
+      const cx = x0 + size / 2;
+      const cy = y0 + size / 2;
+
+      const spots = spotDiagram(state.rays, state.detectorPlane);
+      let sum = 0;
+      for (const s of spots) sum += s.x * s.x + s.y * s.y;
+      const rms = Math.sqrt(sum / spots.length);
+
+      // Fixed by the compute cell, so nothing the reader does from here rescales
+      // it. Defocus, tilt and the expansion order all leave the frame alone,
+      // which is the only way the spot's size can be compared between them.
+      const halfWidth = state.spotHalfWidth;
+      const scale = (size / 2 - 16) / halfWidth;
+
+      ctx.save();
+      // Transparent, with only a border. A white ground looked fine on the
+      // light theme and like a hole punched in the page on the dark one, and
+      // the corner it sits in has no rays to hide anyway.
+      const {tint} = state;
+      ctx.strokeStyle = tint(0.22);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(x0, y0, size, size, 6);
+      ctx.stroke();
+
+      // Everything that scales with the bundle is clipped to the frame. The
+      // frame no longer resizes itself, so a large enough defocus does put
+      // spots outside it, and without this they were drawn across the rest of
+      // the scene as loose dots with no visible connection to the inset.
+      ctx.save();
+      ctx.beginPath();
+      ctx.roundRect(x0 + 1, y0 + 1, size - 2, size - 2, 5);
+      ctx.clip();
+
+      ctx.strokeStyle = tint(0.4);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cx - 5, cy); ctx.lineTo(cx + 5, cy);
+      ctx.moveTo(cx, cy - 5); ctx.lineTo(cx, cy + 5);
+      ctx.stroke();
+      // The dashed circle is the rms radius of the bundle, which is the number
+      // in the readout.
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rms * scale, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (const s of spots) {
+        ctx.fillStyle = state.shellColour(s.shell, 0.9);
+        ctx.beginPath();
+        ctx.arc(cx + s.x * scale, cy + s.y * scale, 1.9, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Drawn after the clip is lifted, and after the spots, so a spot near the
+      // edge cannot sit on top of the label or the bar.
+      ctx.fillStyle = tint(0.6);
+      ctx.font = "10px system-ui, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("spot diagram", x0 + 7, y0 + 13);
+
+      // A scale bar rather than a bare number, so the spot size can be read off
+      // the picture as the frame rescales.
+      const barLength = halfWidth * scale;
+      ctx.strokeStyle = tint(0.6);
+      ctx.fillStyle = tint(0.6);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x0 + size - 8 - barLength, y0 + size - 14);
+      ctx.lineTo(x0 + size - 8, y0 + size - 14);
+      ctx.stroke();
+      ctx.textAlign = "right";
+      const micron = halfWidth * 1e6;
+      ctx.fillText(`${micron < 1 ? micron.toFixed(2) : micron.toFixed(0)} µm`,
+        x0 + size - 8, y0 + size - 5);
+      ctx.restore();
+
+      return rms;
+    }
+  </script>
+
+  <script id="35" type="text/x-typescript">
+    // One repaint, called both by the compute cell and by anything that only
+    // moves the camera. Cheap enough to run on every pointer move: it resamples
+    // trajectories that are already integrated and strokes about a hundred
+    // paths.
+    const redraw = () => {
+      if (!state.ready) return;
+      const {ctx, width: W, height: H} = stage;
+      ctx.clearRect(0, 0, W, H);
+
+      // Neutrals are derived from the inherited text colour rather than written
+      // as fixed greys, so they hold up on a dark page. Read once per frame:
+      // the 2D context ignores `currentColor`, and the theme can change without
+      // anything else about the widget changing.
+      const foreground = currentColor(stage.canvas);
+      state.tint = (alpha) => withAlpha(foreground, alpha);
+
+      state.detectorPlane = Math.min(span.z1, Math.max(span.z0,
+        state.waistPlane + viewState.defocus * 1e-3));
+
+      drawScene(makeCamera());
+      const rms = drawInset();
+
+      const mm = (v) => (v === null ? "—" : `${(v * 1e3).toFixed(2)} mm`);
+      const parts = [`Gaussian image ${mm(state.gaussianPlane)}`];
+      if (state.gaussianPlane !== null) {
+        const shift = (state.waistPlane - state.gaussianPlane) * 1e3;
+        // The threshold is a fraction of the focal distance rather than a fixed
+        // length, because the two lenses focus a metre apart and the waist is
+        // only located to a fraction of an integration step. A fixed micrometre
+        // threshold had the Schiske lens reporting a shift where the answer is
+        // exactly zero.
+        parts.push(
+          Math.abs(shift) < Math.abs(state.gaussianPlane * 1e3) * 1e-4
+            ? "the bundle is narrowest there too"
+            : `narrowest ${Math.abs(shift).toFixed(2)} mm ${shift < 0 ? "earlier" : "later"}`
+        );
+      }
+      // Switched to nanometres below a micron. At the waist of a linearised
+      // lens the bundle really does close to a point, and three decimal places
+      // of micrometres printed that as a flat "0.000".
+      const micron = rms * 1e6;
+      parts.push(
+        micron < 1e-5 ? "the spot closes to a point"
+          : micron < 1 ? `spot radius ${(micron * 1e3).toFixed(1)} nm rms`
+          : `spot radius ${micron < 100 ? micron.toFixed(1) : micron.toFixed(0)} µm rms`
+      );
+      if (state.rotation !== 0) {
+        parts.push(`Larmor rotation ${((state.rotation * 180) / Math.PI).toFixed(1)}°`);
+      }
+      readout.textContent = parts.join(" · ");
+
+      legendHost.replaceChildren(
+        htl.html`<span><b style="color:${state.shellColour(0)}">——</b> innermost cone angle</span>`,
+        htl.html`<span><b style="color:${state.shellColour(state.shells - 1)}">——</b> outermost cone angle</span>`,
+        htl.html`<span><b style="color:#04a1cd">——</b> Gaussian image plane</span>`,
+        htl.html`<span><b style="color:#e8833a">– –</b> detector</span>`
+      );
+    }
+  </script>
+
+  <script id="36" type="text/x-typescript">
+    // Dragging turns the scene, and the two view sliders move the camera and
+    // the detector plane. All three repaint directly rather than setting a
+    // reactive value, so none of them re-integrates the bundle.
+    const pointerRig = (() => {
+      const {canvas} = stage;
+      let dragging = false;
+      let lastX = 0;
+      const handlers = {
+        pointerdown: (event) => {
+          dragging = true;
+          lastX = event.clientX;
+          canvas.setPointerCapture(event.pointerId);
+          canvas.style.cursor = "grabbing";
+        },
+        pointermove: (event) => {
+          if (!dragging) return;
+          viewState.roll += (event.clientX - lastX) * 0.012;
+          lastX = event.clientX;
+          redraw();
+        },
+        pointerup: (event) => {
+          dragging = false;
+          canvas.releasePointerCapture(event.pointerId);
+          canvas.style.cursor = "grab";
+        }
+      };
+      for (const [type, handler] of Object.entries(handlers)) {
+        canvas.addEventListener(type, handler);
+      }
+
+      const onView = () => {
+        viewState.tilt = viewFields.value.elevation;
+        viewState.defocus = viewFields.value.defocus;
+        redraw();
+      };
+      viewFields.addEventListener("input", onView);
+      onView();
+
+      // Repaint when the page changes theme. The canvas draws its neutrals from
+      // the inherited text colour, and nothing else would tell it that colour
+      // has changed — the widget would keep its light-mode greys until the
+      // reader happened to touch a control.
+      const themes = new MutationObserver(redraw);
+      themes.observe(document.documentElement, {
+        attributes: true, attributeFilter: ["class", "data-theme", "style"]
+      });
+      const scheme = matchMedia("(prefers-color-scheme: dark)");
+      scheme.addEventListener("change", redraw);
+
+      // This cell depends on the stage, which depends on the width, and on the
+      // view controls, which are rebuilt per lens. Without removing them the
+      // handlers accumulate and one drag turns the scene several times over.
+      invalidation.then(() => {
+        for (const [type, handler] of Object.entries(handlers)) {
+          canvas.removeEventListener(type, handler);
+        }
+        viewFields.removeEventListener("input", onView);
+        themes.disconnect();
+        scheme.removeEventListener("change", redraw);
+      });
+      return canvas;
+    })()
+  </script>
+
+  <script id="37" type="text/x-typescript">
+    // The one reactive cell that writes `state`. Everything the drawing needs
+    // is copied in here, so the draw path has no reactive dependencies of its
+    // own and can be called from a pointer handler.
+    const compute = (() => {
+      // A ray's colour says which shell of the cone it entered on, which is
+      // what makes the crossing order readable.
+      //
+      // Sampled from magma rather than interpolated between two hand-picked
+      // colours. Mixing blue into orange in RGB passes through grey, so the
+      // middle shell came out looking like a different kind of object. A
+      // perceptual ramp stays saturated the whole way and reads as ordered. The
+      // ends are trimmed to keep it off black and off pale yellow.
+      const table = colormap("magma");
+      const shellColour = (shell, alpha = 1) => {
+        const t = cone.shells <= 1 ? 0.5 : shell / (cone.shells - 1);
+        const i = Math.round((0.3 + 0.42 * t) * 255) * 3;
+        return `rgba(${table[i]},${table[i + 1]},${table[i + 2]},${alpha})`;
+      };
+
+      Object.assign(state, {
+        ready: true,
+        rays,
+        shells: cone.shells,
+        coneAngle: cone.angle * 1e-3,
+        shellColour,
+        lensHalfWidth: field.a,
+        gaussianPlane,
+        waistPlane: waistPlane ?? span.z1,
+        spotReach,
+        // The inset's half-width, fixed here rather than derived from whatever
+        // the inset happens to be showing, so that neither the defocus slider
+        // nor the expansion order rescales the frame underneath a reader trying
+        // to compare them.
+        spotHalfWidth: (() => {
+          const reach = Math.max(1e-9, spotReach) * 1.05;
+          const decade = 10 ** Math.floor(Math.log10(reach));
+          // A fine ladder, so the scale bar still reads as a round number
+          // without the frame jumping to three times what it needs. On 1-2-5, a
+          // reach of 72 rounded to 100 and left the in-focus disc adrift in a
+          // mostly empty frame.
+          return [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+            .map((m) => m * decade).find((v) => v >= reach);
+        })(),
+        rotation,
+        rotates: lensSpec.key === "magnetic",
+        // The transverse half-width is a geometric estimate from the cone angle
+        // rather than the largest radius the rays actually reach, so the frame
+        // changes only when the cone angle does. An extent read off the traces
+        // would rescale every time the expansion order moved a ray.
+        geometry: {
+          z0: span.z0,
+          z1: span.z1,
+          rMax: cone.angle * 1e-3 * (span.z1 - span.z0) * 0.6,
+          aspect: 2.2
+        }
+      });
+      redraw();
+      return state.waistPlane;
+    })()
+  </script>
+</notebook>

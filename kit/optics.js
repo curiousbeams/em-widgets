@@ -186,15 +186,15 @@ export function complexProbe({
 }
 
 /**
- * The antialiasing aperture abtem applies throughout multislice: a disc at 2/3
+ * The antialiasing aperture abtem applies throughout multislice, a disc at 2/3
  * of the Nyquist frequency with a short cosine taper.
  *
  * Multislice convolves the wave with the potential once per slice, and a product
- * in real space is a convolution in reciprocal space — so each step spreads the
- * wave's bandwidth and the top third of the grid fills with aliased scattering
- * that has wrapped around the Nyquist edge. Band-limiting every step is what
- * keeps that out. It is not a cosmetic filter: without it a four-slice exit wave
- * is already 5% wrong (measured against abtem in `test/multislice.test.js`).
+ * in real space is a convolution in reciprocal space, so each step spreads the
+ * wave's bandwidth. The top third of the grid then fills with aliased scattering
+ * that has wrapped around the Nyquist edge. Band-limiting every step keeps that
+ * out. Without it a four-slice exit wave is already 5% wrong (measured against
+ * abtem in `test/multislice.test.js`).
  *
  * Matches `abtem.antialias.antialias_aperture` with its default cutoff of 2/3
  * and taper of 0.01.

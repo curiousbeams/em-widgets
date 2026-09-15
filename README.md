@@ -18,10 +18,12 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Six widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
-`aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`, and
+Eight widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+`aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
-against abtem to ~1e-6.
+against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
+find its focal length, and `non-paraxial-rays`, which traces the coupled 3D ray
+equations to show Larmor rotation and spherical aberration.
 
 ## Adding a widget to a page
 
@@ -80,6 +82,10 @@ several pages with different defaults, via `main.redefine(name, value)`.
 - Observable's `md` cells do not render `$...$`. Use `${tex`\chi`}` instead.
 - Imports and data URLs must be absolute (see above) — Desktop cannot see
   anything outside the notebook's own folder.
+- **Do not name a cell `view`.** It is an Observable builtin, and a cell
+  declaring it does not shadow the builtin for other cells. They keep seeing the
+  standard library's function, so `view.tilt` reads `undefined` and the failure
+  surfaces much later as a `NaN` coordinate. `viewState` is a safe name.
 - `Event` is not a recognised Observable global (`CustomEvent` is). The wrapper
   provides `Event`, `ResizeObserver`, `DOMParser`, `MutationObserver`,
   `IntersectionObserver` and `structuredClone` as builtins, so the site is
@@ -98,6 +104,8 @@ duplicated across the lab's Python notebooks.
 | `fft.js` | `fft2`/`ifft2` (radix-2 + Bluestein, any size), `fftshift`, `fourierShift`, complex helpers |
 | `optics.js` | `chi` to 6th order, `rayDisplacement`, `softAperture`, `complexProbe`, `fresnelPropagator`, `multislice`, `antialiasAperture`, `scherzerDefocus` |
 | `specimen.js` | `fccCluster`, `amorphousSupport`, `projectedPotential` — the Lobato/Fourier superposition abtem uses |
+| `paraxial.js` | `schiskeField`, `glaserField`, `integrateRay`, `principalRays`, `imagingProperties`, `thinLensPower` — **SI units**, unlike the rest of the kit |
+| `nonparaxial.js` | `laplaceExpansion`, `equationsOfMotion`, `traceRay3D`, `coneOfRays`, `larmorAngle`, `axialCrossing`, `spotDiagram` — also **SI units** |
 | `detectors.js` | `annularMask`, `segmentedDetector`, `centreOfMassFromSegments`, `segmentIndex` |
 | `image.js` | `histogramScaling`, `radialAverage`, `integrateGradient`, `gradient2d`, `warpNearest`, `poisson`, `cropCenter` |
 | `color.js` | `complexToRGB` (inverse CIECAM02), `phaseWheel`, `applyColormap` — magma, gray, twilight, RdBu, PuOr, PiYG, eclipse |

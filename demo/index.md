@@ -46,3 +46,19 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
   notebook: "/notebooks/stem-measurements.html"
 }
 :::
+
+## Paraxial ray optics
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/paraxial-rays.html"
+}
+:::
+
+## Non-paraxial ray tracing
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/non-paraxial-rays.html"
+}
+:::

@@ -37,3 +37,5 @@ export * from "./anim.js";
 export * from "./ui.js";
 export * from "./specimen.js";
 export * from "./detectors.js";
+export * from "./paraxial.js";
+export * from "./nonparaxial.js";
