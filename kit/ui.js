@@ -106,6 +106,11 @@ const STYLES = `
    width, which is the part the reader actually drags. */
 .em-controls--compact form[class^="inputs-"] {
   display: block; font-size: 11px; line-height: 1.35; margin: 0 0 5px;
+  /* Observable's Inputs carry an inline max-width of 640px. That never bites in
+     a multi-column grid, where no cell is that wide, but a control given a row
+     of its own then wraps at 640 with empty space beside it.
+     (No backticks in this block: it lives inside a template literal.) */
+  width: auto; max-width: none;
 }
 .em-controls--compact form[class^="inputs-"] > label {
   display: block; width: auto; padding: 0; margin: 0 0 1px;
@@ -170,6 +175,36 @@ const STYLES = `
   color: var(--theme-foreground-muted, inherit);
 }
 .em-controls--inline form[class^="inputs-"] > div { display: flex; width: auto; }
+
+/* A diagram of panels joined by labelled arrows. */
+.em-flow { position: relative; display: grid; justify-content: center; }
+.em-flow > svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; overflow: visible;
+}
+.em-flow-node { margin: 0; position: relative; }
+.em-flow-node > figcaption {
+  font-size: 10px; text-align: center; margin-top: 4px; line-height: 1.25;
+  color: var(--theme-foreground-muted, inherit);
+}
+.em-flow-link-label {
+  font-size: 10px; font-family: var(--monospace, ui-monospace, Menlo, monospace);
+}
+
+/* A two-dimensional control: magnitude and direction in one gesture. */
+.em-pad { margin: 0 0 6px; display: block; width: max-content; }
+.em-pad > .em-pad-label {
+  display: block; font-size: 11px; line-height: 1.35; margin: 0 0 2px;
+  color: var(--theme-foreground-muted, inherit);
+  font-family: var(--monospace, ui-monospace, Menlo, monospace);
+}
+.em-pad > svg { display: block; touch-action: none; cursor: crosshair; }
+.em-pad > .em-pad-readout {
+  display: block; font-size: 10px; margin-top: 2px; text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--monospace, ui-monospace, Menlo, monospace);
+  color: var(--theme-foreground-muted, inherit);
+}
 
 .em-toggle {
   padding: 5px 13px; border-radius: 6px; cursor: pointer;
@@ -375,6 +410,373 @@ export function controls(form, {columns = 2, minWidth = 240, gap = 18, compact =
   return form;
 }
 
+let flowCount = 0;
+
+/**
+ * Labelled canvases on a grid, joined by arrows drawn over them.
+ *
+ * `panels` lays out a row of images and leaves the reader to supply the arrows.
+ * An algorithm is a sequence of operations on those images, and the operations
+ * are the part worth naming — so this places each panel on a grid and draws the
+ * connection between them, with the operation written on the arrow.
+ *
+ * Arrow geometry is measured from the laid-out elements rather than computed
+ * from the grid, so it survives reflow, and a `ResizeObserver` redraws it.
+ *
+ * A node is a canvas by default. Give it `content: element` instead of a width
+ * and height and that element is placed in the cell as-is, which is how a plot
+ * or a legend joins the diagram without being drawn on a canvas.
+ *
+ * @param {Array<{key: string, label?: string, width?: number, height?: number,
+ *   content?: HTMLElement, row?: number, column?: number, rowSpan?: number,
+ *   colSpan?: number, cursor?: string}>} nodes
+ * @param {Array<{from: string, to: string, label?: string,
+ *   route?: "auto"|"h"|"v", bias?: number}>} links `from` and `to` are node
+ *   keys. `bias` moves the corner of an elbow along the run, 0 being hard
+ *   against the start and 1 against the end; the default 0.5 is the midpoint.
+ * @param {object} [options]
+ * @param {number} [options.gap=30] space between grid cells, which is where the
+ *   arrows and their labels go
+ * @param {{before: string, label?: string}} [options.divider] a dashed rule down
+ *   the left edge of a node's column, for marking a change of domain
+ * @returns {{node: HTMLElement, panels: Map<string, object>, redraw(): void,
+ *   setLinkLabel(from: string, to: string, text: string): void}}
+ */
+export function flowDiagram(nodes, links, {gap = 30, divider = null} = {}) {
+  const svgNS = "http://www.w3.org/2000/svg";
+  const make = (name, attrs = {}) => {
+    const node = document.createElementNS(svgNS, name);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    return node;
+  };
+
+  const root = document.createElement("div");
+  root.className = "em-flow";
+  root.style.gap = `${gap}px`;
+  ensureStyles(root);
+
+  const id = `em-flow-${++flowCount}`;
+  const made = new Map();
+
+  for (const spec of nodes) {
+    const figure = document.createElement("figure");
+    figure.className = "em-flow-node";
+    if (spec.width != null) figure.style.width = `${spec.width}px`;
+    if (spec.row != null) figure.style.gridRow = `${spec.row + 1} / span ${spec.rowSpan ?? 1}`;
+    if (spec.column != null) figure.style.gridColumn = `${spec.column + 1} / span ${spec.colSpan ?? 1}`;
+
+    let canvas = null;
+    let ctx = null;
+    if (spec.content) {
+      figure.appendChild(spec.content);
+    } else {
+      ({canvas, ctx} = makeCanvas(spec.width, spec.height));
+      canvas.style.borderRadius = "4px";
+      if (spec.cursor) canvas.style.cursor = spec.cursor;
+      figure.appendChild(canvas);
+    }
+
+    const caption = document.createElement("figcaption");
+    caption.textContent = spec.label ?? "";
+    if (!spec.label) caption.style.display = "none";
+    figure.appendChild(caption);
+
+    root.appendChild(figure);
+    made.set(spec.key, {
+      canvas, ctx, node: figure, content: spec.content ?? null,
+      width: spec.width, height: spec.height,
+      setLabel(text) {
+        caption.textContent = text;
+        caption.style.display = text ? "" : "none";
+      }
+    });
+  }
+
+  // The arrow layer goes last so it paints over the panels.
+  const svg = make("svg");
+  const defs = make("defs");
+  const marker = make("marker", {
+    id: `${id}-head`, viewBox: "0 0 8 8", refX: 7, refY: 4,
+    markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
+  });
+  marker.appendChild(make("path", {d: "M0,0 L8,4 L0,8 z", fill: "currentColor"}));
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+  root.appendChild(svg);
+
+  const labels = new Map();
+
+  const redraw = () => {
+    const frame = root.getBoundingClientRect();
+    if (frame.width === 0) return;
+    svg.setAttribute("viewBox", `0 0 ${frame.width} ${frame.height}`);
+    while (svg.lastChild !== defs) svg.removeChild(svg.lastChild);
+
+    // Horizontal links anchor on the canvas, so a caption under one panel and
+    // not another does not pull the arrow off centre. Vertical links anchor on
+    // the figure, because a caption sits between the canvas and the arrow and
+    // the line would otherwise be drawn straight through the words.
+    const box = (key, whole = false) => {
+      const panel = made.get(key);
+      const r = ((whole ? panel.node : panel.canvas) ?? panel.node).getBoundingClientRect();
+      return {
+        left: r.left - frame.left, right: r.right - frame.left,
+        top: r.top - frame.top, bottom: r.bottom - frame.top,
+        cx: (r.left + r.right) / 2 - frame.left,
+        cy: (r.top + r.bottom) / 2 - frame.top
+      };
+    };
+
+    if (divider) {
+      const at = box(divider.before).left - gap / 2;
+      svg.appendChild(make("line", {
+        x1: at, y1: 0, x2: at, y2: frame.height,
+        stroke: "currentColor", "stroke-opacity": 0.28,
+        "stroke-width": 1, "stroke-dasharray": "5 4"
+      }));
+      if (divider.label) {
+        const text = make("text", {
+          x: at + 5, y: 9, "font-size": 10, fill: "currentColor",
+          "fill-opacity": 0.55, class: "em-flow-link-label"
+        });
+        text.textContent = divider.label;
+        svg.appendChild(text);
+      }
+    }
+
+    for (const link of links) {
+      const route = link.route ?? "auto";
+      const horizontal = route === "h"
+        || (route === "auto" && box(link.to).left >= box(link.from).right - 1);
+      const a = box(link.from, !horizontal);
+      const b = box(link.to, !horizontal);
+
+      const bias = link.bias ?? 0.5;
+      let start;
+      let end;
+      let mid;
+      if (horizontal) {
+        const forward = b.cx >= a.cx;
+        start = {x: forward ? a.right : a.left, y: a.cy};
+        end = {x: forward ? b.left : b.right, y: b.cy};
+      } else {
+        const down = b.cy >= a.cy;
+        start = {x: a.cx, y: down ? a.bottom : a.top};
+        end = {x: b.cx, y: down ? b.top : b.bottom};
+      }
+      mid = {
+        x: start.x + bias * (end.x - start.x),
+        y: start.y + bias * (end.y - start.y)
+      };
+
+      // A straight line when the two are aligned, an elbow when they are not,
+      // so an arrow never cuts diagonally across a panel between them.
+      const aligned = horizontal
+        ? Math.abs(start.y - end.y) < 2
+        : Math.abs(start.x - end.x) < 2;
+      const d = aligned
+        ? `M ${start.x} ${start.y} L ${end.x} ${end.y}`
+        : horizontal
+          ? `M ${start.x} ${start.y} L ${mid.x} ${start.y} L ${mid.x} ${end.y} L ${end.x} ${end.y}`
+          : `M ${start.x} ${start.y} L ${start.x} ${mid.y} L ${end.x} ${mid.y} L ${end.x} ${end.y}`;
+
+      svg.appendChild(make("path", {
+        d, fill: "none", stroke: "currentColor", "stroke-opacity": 0.5,
+        "stroke-width": 1.2, "marker-end": `url(#${id}-head)`
+      }));
+
+      const text = labels.get(`${link.from}>${link.to}`) ?? link.label;
+      if (text) {
+        const node = make("text", {
+          // Above the line either way, rather than struck through by it.
+          x: mid.x, y: mid.y - 5,
+          "text-anchor": "middle",
+          "dominant-baseline": "auto",
+          fill: "currentColor", "fill-opacity": 0.75,
+          "paint-order": "stroke",
+          stroke: "var(--theme-background, #fff)", "stroke-width": 3,
+          "stroke-linejoin": "round", class: "em-flow-link-label"
+        });
+        node.textContent = text;
+        svg.appendChild(node);
+      }
+    }
+  };
+
+  // Lay out first, then measure. A cell builds its DOM before Observable
+  // attaches it, so every rect is zero until the next frame.
+  requestAnimationFrame(redraw);
+  if (typeof ResizeObserver === "function") new ResizeObserver(redraw).observe(root);
+
+  return {
+    node: root,
+    panels: made,
+    redraw,
+    setLinkLabel(from, to, text) {
+      labels.set(`${from}>${to}`, text);
+      redraw();
+    }
+  };
+}
+
+/**
+ * A two-dimensional input: drag inside a disc to set a magnitude and a
+ * direction at once.
+ *
+ * Aberrations like astigmatism and coma are one physical quantity with a size
+ * and an axis, and splitting them across two linear sliders makes the reader
+ * reassemble them. Worse, a slider labelled "angle" leaves the mapping between
+ * its number and the direction on screen entirely unstated.
+ *
+ * So the pad is drawn as a **miniature of the panel it acts on**: the first
+ * array axis runs down it and the second across it, exactly as an image of a
+ * corner-centered grid is drawn. Where the handle sits is where the aberration
+ * points, and `angle` is `atan2(second, first)` — the `phi` convention of
+ * `grid.polarCoordinates` — so it can be handed straight to `chi` as a
+ * `phi_nm`.
+ *
+ * Behaves like an Observable input: it has a `.value` and emits `input`, so
+ * `view(vectorPad(...))` and `Inputs.form({astigmatism: vectorPad(...)})` both
+ * work.
+ *
+ * @param {object} [options]
+ * @param {string} [options.label] shown above the disc
+ * @param {number} [options.size=104] the disc's box, in CSS pixels
+ * @param {number} [options.max=1] magnitude at the rim
+ * @param {number} [options.magnitude=0] initial magnitude
+ * @param {number} [options.angle=0] initial angle [degrees]
+ * @param {number} [options.fold=1] rotational order of the aberration. Above
+ *   one, the directions that give the same aberration are drawn as ghosts, so
+ *   the degeneracy is visible rather than a surprise.
+ * @param {string} [options.unit=""] appended to the magnitude in the readout
+ * @param {number} [options.digits=1] decimals in the readout
+ * @returns {HTMLElement} with `.value = {magnitude, angle}`
+ */
+export function vectorPad({
+  label = "",
+  size = 104,
+  max = 1,
+  magnitude = 0,
+  angle = 0,
+  fold = 1,
+  unit = "",
+  digits = 1
+} = {}) {
+  const svgNS = "http://www.w3.org/2000/svg";
+  const make = (name, attrs) => {
+    const node = document.createElementNS(svgNS, name);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+    return node;
+  };
+
+  const centre = size / 2;
+  const rim = centre - 7;
+
+  const root = document.createElement("div");
+  root.className = "em-pad";
+  ensureStyles(root);
+
+  if (label) {
+    const text = document.createElement("span");
+    text.className = "em-pad-label";
+    text.textContent = label;
+    root.appendChild(text);
+  }
+
+  const svg = make("svg", {width: size, height: size, viewBox: `0 0 ${size} ${size}`});
+  const faint = "var(--theme-foreground-faintest, rgba(128,128,128,0.3))";
+
+  // Two guide rings and a pair of axes, so a magnitude can be judged by eye.
+  for (const fraction of [1, 0.5]) {
+    svg.appendChild(make("circle", {
+      cx: centre, cy: centre, r: rim * fraction,
+      fill: "none", stroke: faint, "stroke-width": 1,
+      "stroke-dasharray": fraction === 1 ? "none" : "2 3"
+    }));
+  }
+  svg.appendChild(make("line", {
+    x1: centre - rim, y1: centre, x2: centre + rim, y2: centre,
+    stroke: faint, "stroke-width": 1
+  }));
+  svg.appendChild(make("line", {
+    x1: centre, y1: centre - rim, x2: centre, y2: centre + rim,
+    stroke: faint, "stroke-width": 1
+  }));
+
+  // Ghost handles first, so the live one draws over them.
+  const ghosts = [];
+  for (let i = 1; i < fold; i++) {
+    const ghost = make("circle", {
+      cx: centre, cy: centre, r: 4, fill: "none",
+      stroke: UI.accent, "stroke-width": 1.5, "stroke-opacity": 0.4
+    });
+    ghosts.push(ghost);
+    svg.appendChild(ghost);
+  }
+
+  const stem = make("line", {
+    x1: centre, y1: centre, x2: centre, y2: centre,
+    stroke: UI.accent, "stroke-width": 1.5, "stroke-opacity": 0.6
+  });
+  const handle = make("circle", {
+    cx: centre, cy: centre, r: 5.5, fill: UI.accent, "fill-opacity": 0.85,
+    stroke: "var(--theme-background, #fff)", "stroke-width": 1.5
+  });
+  svg.appendChild(stem);
+  svg.appendChild(handle);
+  root.appendChild(svg);
+
+  const readout = document.createElement("span");
+  readout.className = "em-pad-readout";
+  root.appendChild(readout);
+
+  // `angle` is measured in the phi convention: from the first axis, which runs
+  // down the pad, towards the second, which runs across it.
+  const place = (node, m, degrees) => {
+    const radians = (degrees * Math.PI) / 180;
+    const radius = (Math.min(m, max) / max) * rim;
+    node.setAttribute("cx", centre + radius * Math.sin(radians));
+    node.setAttribute("cy", centre + radius * Math.cos(radians));
+  };
+
+  const render = () => {
+    const {magnitude: m, angle: a} = root.value;
+    place(handle, m, a);
+    stem.setAttribute("x2", handle.getAttribute("cx"));
+    stem.setAttribute("y2", handle.getAttribute("cy"));
+    ghosts.forEach((ghost, i) => place(ghost, m, a + ((i + 1) * 360) / fold));
+    readout.textContent = `${m.toFixed(digits)}${unit} · ${Math.round(a)}°`;
+  };
+
+  root.value = {magnitude, angle};
+  render();
+
+  const pick = (event) => {
+    const box = svg.getBoundingClientRect();
+    const across = event.clientX - box.left - centre;
+    const down = event.clientY - box.top - centre;
+    const radius = Math.hypot(across, down);
+    root.value = {
+      magnitude: Math.min(1, radius / rim) * max,
+      // Wrapped into [0, 360) so a value read back never carries a sign that
+      // depends on which way the pointer came in.
+      angle: ((Math.atan2(across, down) * 180) / Math.PI + 360) % 360
+    };
+    render();
+    root.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+  };
+
+  svg.addEventListener("pointerdown", (event) => {
+    svg.setPointerCapture(event.pointerId);
+    pick(event);
+  });
+  svg.addEventListener("pointermove", (event) => {
+    if (event.buttons > 0) pick(event);
+  });
+
+  return root;
+}
+
 /**
  * A toggle button that swaps its own label, e.g. `▶ Scan` ⇄ `■ Stop`.
  *
@@ -406,12 +808,32 @@ export function toggleButton({on, off, value = false}) {
   // The label lives in its own span: `ensureStyles` puts a <style> element
   // inside the button, and setting `textContent` on the button would throw it
   // away on the first repaint.
+  //
+  // Both labels are always laid out, stacked in one grid cell, with the inactive
+  // one merely invisible. That keeps the button exactly one size: swapping the
+  // text otherwise resizes it, and `play` and `pause` do not even share a line
+  // height because their glyphs come from different fonts — enough that toggling
+  // one visibly nudged the whole widget below it down the page.
   const label = document.createElement("span");
+  label.style.display = "grid";
+  label.style.alignItems = "center";
+  label.style.justifyItems = "center";
+
+  const faces = [off, on].map((text) => {
+    const face = document.createElement("span");
+    face.style.gridArea = "1 / 1";
+    face.textContent = text;
+    label.appendChild(face);
+    return face;
+  });
   button.appendChild(label);
 
   function paint() {
-    label.textContent = state ? on : off;
+    faces[0].style.visibility = state ? "hidden" : "visible";
+    faces[1].style.visibility = state ? "visible" : "hidden";
     button.setAttribute("aria-pressed", String(state));
+    // For assistive technology and for anything reading the button's text.
+    button.setAttribute("aria-label", state ? on : off);
   }
   paint();
 

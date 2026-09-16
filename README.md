@@ -18,7 +18,7 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Eleven widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+Thirteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
 `aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
 against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
@@ -26,8 +26,11 @@ find its focal length, `non-paraxial-rays`, which traces the coupled 3D ray
 equations to show Larmor rotation and spherical aberration, `electron-column`,
 which drives an SEM or a S/TEM column from one table of components,
 `reciprocity`, which builds a bright-field STEM column by reversing a TEM one,
-and `projection-sets`, which shows why alternating projections is not enough for
-phase retrieval.
+`projection-sets`, which shows why alternating projections is not enough for
+phase retrieval, `aperture-overlap`, which draws both slices of the aperture
+overlap function every direct phase-retrieval method is built on, and
+`direct-ptychography`, which runs SSB, OBF, parallax and iCOM through one
+pipeline where only the kernel changes.
 
 ## Adding a widget to a page
 
@@ -111,6 +114,33 @@ several pages with different defaults, via `main.redefine(name, value)`.
   better kept out of the reactive graph entirely — a mutable state object plus a
   listener that repaints. See the tilt and defocus sliders in
   `non-paraxial-rays`.
+- **A quantity with a size and a direction wants one control, not two.** Two
+  linear sliders make the reader reassemble a vector, and a slider labelled
+  "angle" never says how its number relates to the picture. `ui.vectorPad` is
+  drawn as a miniature of the panel it acts on — first array axis down, second
+  across — so the handle points where the aberration points, and its `angle` is
+  already in the `phi` convention `chi` expects. `aperture-overlap` uses it for
+  astigmatism and coma and keeps a plain slider for defocus, which has no axis.
+  `_build/pw/drag.mjs` only exercises range inputs, so a pad needs its own
+  check.
+- **A cell that reads `form.value.x` depends on the whole form.** Observable
+  tracks the reference, not the field, so any other control in the same
+  `Inputs.form` re-runs it — which in `direct-ptychography` made choosing a
+  different kernel re-simulate a second of data the kernel has no effect on.
+  Where a cell is expensive, hand out one value per field (a `Generators.observe`
+  per key that stays quiet when its own value has not changed) so each consumer
+  depends only on what it reads.
+- **Observable's Inputs carry an inline `max-width: 640px`.** It never bites in
+  a multi-column control grid, where no cell is that wide, so it surfaces only
+  when a control is given a row of its own — a five-option radio then wraps to
+  two lines with 200px of empty space beside it. `ui.controls`' compact mode
+  clears it.
+- **A control that swaps its own label must not resize.** `ui.toggleButton`
+  lays both labels out in one grid cell and hides the inactive one, so the
+  button is always the size of the larger. Letting the text change instead
+  resizes it — `▶` and `⏸` do not even share a line height, since they come
+  from different fonts — and a play button that grows by two pixels nudges
+  every panel below it down the page.
 - **Do not name a cell `view`.** It is an Observable builtin, and a cell
   declaring it does not shadow the builtin for other cells. They keep seeing the
   standard library's function, so `view.tilt` reads `undefined` and the failure
@@ -139,10 +169,12 @@ duplicated across the lab's Python notebooks.
 | `image.js` | `histogramScaling`, `radialAverage`, `integrateGradient`, `gradient2d`, `warpNearest`, `poisson`, `cropCenter` |
 | `color.js` | `complexToRGB` (inverse CIECAM02), `phaseWheel`, `applyColormap` — magma, gray, twilight, RdBu, PuOr, PiYG, eclipse |
 | `scene3d.js` | `makeView`, `project`/`unproject`, `drawSpheres`, `drawPlane`, `drawProbeCone` — canvas 2D, no WebGL |
-| `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `UI` and `SERIES` (the lab's palettes) |
+| `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `vectorPad` (magnitude and axis in one gesture), `flowDiagram` (panels joined by labelled arrows, canvases or arbitrary content), `UI` and `SERIES` (the lab's palettes) |
 | `anim.js` | `frames`, `whenVisible`, `qualityBudget` — generator cells the Observable scheduler drives |
 | `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `currentColor`, `pointerToIndices` |
 | `projections.js` | `generalisedProjection`, `productProjection`, `namedParameters` (AP/DM/RRR/RAAR), `line`, `polarCurve`, `iteration`, `residual` |
+| `ptycho.js` | `overlapFunction` and `overlapFunctionAtQ` (the two slices of Γ), `overlapRegions`, `overlapSums`, `parallaxShifts`, `tileSpectrum`, `directAccumulator`/`accumulatePixel`/`directImage`, `directCTF`, `directSSNR` |
+| `ptycho-sim.js` | `measurePosition`, `forwardModel` (resumable, bright-field subset only), `scanSpectra` |
 | `raytrace.js` | `transferMatrix`, `traceRays`, `traceParallel`, `traceFrom`, `COLUMNS`/`buildColumn`, `reverseColumn`, `findCrossovers`/`findPlanes`, `pairedSeparationAt` |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |
 
@@ -179,6 +211,13 @@ with zstd (it is sparse), a single chunk costs ~12 KB, and reading the whole
 array costs 899 KB across 148 range requests. GitHub Pages, jsDelivr and MyST's
 own dev server all support `HEAD` + `Range` with CORS, so this works wherever
 you host it.
+
+Smaller arrays do not need any of this. the three `data/*-potential.f32`
+specimens are 36 kB each of raw little-endian float32, read with one `fetch` and
+wrapped in a `Float32Array`; as JSON each would have been half a megabyte, and
+base64 inside JSON would have needed a decode step in the notebook. Either way, resolve the URL
+through `resolveAsset` so a local checkout does not silently read production
+data.
 
 Two rules, both enforced by the tool:
 

@@ -31,6 +31,22 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
 }
 :::
 
+## Aperture overlap
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/aperture-overlap.html"
+}
+:::
+
+## Direct ptychography
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/direct-ptychography.html"
+}
+:::
+
 ## Probe aberrations
 
 :::{anywidget} ../observable-notebook.mjs

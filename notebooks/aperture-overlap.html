@@ -1,0 +1,459 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Aperture overlap</title>
+  <script id="1" type="text/markdown">
+    # The aperture overlap function
+  </script>
+  <script id="2" type="text/markdown">
+    Every non-iterative STEM phase-retrieval method rests on one object. Take the
+    diffraction intensities and Fourier transform them over the scan coordinate.
+    For a weak phase object the result separates,
+
+    ${tex.block`G(\mathbf{q},\mathbf{k}) = |\tilde\psi(\mathbf{k})|^2\,\delta(\mathbf{q}) + \Gamma(\mathbf{q},\mathbf{k})\,\tilde\phi(\mathbf{q})`}
+
+    so the specimen phase ${tex`\tilde\phi(\mathbf{q})`} is multiplied by
+
+    ${tex.block`\Gamma(\mathbf{q},\mathbf{k}) = \tilde\psi^{*}(\mathbf{k})\tilde\psi(\mathbf{k}-\mathbf{q}) - \tilde\psi(\mathbf{k})\tilde\psi^{*}(\mathbf{k}+\mathbf{q}), \qquad \tilde\psi(\mathbf{k}) = A(\mathbf{k})\,\mathrm{e}^{-\mathrm{i}\chi(\mathbf{k})}`}
+
+    Recovering the phase means undoing ${tex`\Gamma`}, and the methods differ in
+    how they do it. So it is worth knowing what it looks like.
+
+    ${tex`\Gamma`} depends on two vectors, which is why it is awkward to draw.
+    The two panels below are its two slices. **Drag the marker in either panel**
+    — each one sets the variable the other panel holds fixed.
+
+    - **Left**, over the detector: three apertures, one at the origin and one
+      displaced by each of ${tex`\pm\mathbf{q}`}. Where two of them meet,
+      ${tex`\Gamma`} is non-zero and that detector pixel carries information
+      about this spatial frequency. Where all three meet it cancels in focus.
+    - **Right**, over spatial frequency: what a single detector pixel measures.
+      Nothing reaches beyond ${tex`2\alpha`}, which is the resolution limit of
+      every direct method.
+
+    Colour is the phase of ${tex`\Gamma`} and brightness its magnitude. With no
+    aberrations the phase is constant inside each region, which is what makes
+    the simplest methods work. **Add defocus** and the phase starts winding, and
+    a method that does not know about it will fail.
+  </script>
+
+  <!-- Fewer display cells here than the kit's usual one-per-piece, because the
+       pieces of this widget are not independent. The pads are miniatures of the
+       panels and sit beside them; each panel's marker sets the other panel's
+       fixed variable. A page that embedded any one of them alone would be
+       showing a control with nothing to control. The readout does stand alone,
+       so it stays its own cell. -->
+  <script id="3" type="text/x-typescript">
+    const overlapView = display(widget);
+  </script>
+  <script id="3d" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="4" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength, angularSpatialFrequencies, angularSampling,
+      softAperture, complexProbe, chi,
+      complex, fftshiftComplex,
+      overlapFunction, overlapFunctionAtQ, overlapRegions, checkOverlapGeometry,
+      complexToRGB, phaseWheel, blit, pointerToIndices,
+      controls as gridControls, badge, row, column, vectorPad, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="5" type="text/x-typescript" pinned="">
+    const n = 128
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    // Aperture semiangle [mrad].
+    const semiangle = 20
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+
+  <script id="9" type="text/x-typescript" pinned="">
+    // How many aperture radii fit across the grid.
+    //
+    // The overlap function has support out to 2α, so the grid has to reach past
+    // that or the picture wraps around and what looks like structure is
+    // aliasing. It also has to stay under 2.5: `overlapFunction` reads the
+    // shifted probes at wrapped indices, which is only harmless while four
+    // aperture radii fit inside the grid.
+    const fieldOfViewInAlpha = 2.3
+  </script>
+  <script id="10" type="text/x-typescript" pinned="">
+    // alpha_max = wavelength / (2 * sampling), inverted for the sampling that
+    // puts `fieldOfViewInAlpha` aperture radii at the edge.
+    const sampling = (() => {
+      const alphaMax = fieldOfViewInAlpha * semiangle * 1e-3;
+      const s = wavelength / (2 * alphaMax);
+      return [s, s];
+    })()
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    // Aperture radius, in pixels of the grid.
+    const radiusPixels = n / (2 * fieldOfViewInAlpha)
+  </script>
+  <script id="12" type="text/x-typescript" pinned="">
+    // Fail loudly here rather than drawing a quietly aliased picture.
+    const geometryCheck = (checkOverlapGeometry(n, n, radiusPixels), true)
+  </script>
+
+  <script id="13" type="text/x-typescript">
+    // Defocus is rotationally symmetric, so it is a magnitude and nothing else.
+    const defocusFields = gridControls(
+      Inputs.form({
+        defocus: Inputs.range([-30, 30], {value: 0, step: 0.5, label: "defocus (nm)"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="13b" type="text/x-typescript">
+    // Astigmatism and coma each have a size and an axis, which is one quantity
+    // rather than two. The pad is drawn in the same orientation as the panels
+    // beside it, so where the handle points is where the aberration points.
+    //
+    // Two-fold: astigmatism at an axis and at that axis turned by 180 degrees
+    // are the same aberration, and the ghost handle says so.
+    const astigmatismPad = vectorPad({
+      label: "astigmatism (nm)", max: 20, fold: 2, unit: " nm", size: 104
+    })
+  </script>
+  <script id="13c" type="text/x-typescript">
+    // One-fold, so no ghost: coma points one way and reversing it is a
+    // different aberration.
+    const comaPad = vectorPad({
+      label: "coma (µm)", max: 4, fold: 1, unit: " µm", digits: 2, size: 104
+    })
+  </script>
+  <script id="13d" type="text/x-typescript">
+    // Stable element references only, so this never rebuilds under a drag.
+    const controlFields = column([defocusFields, astigmatismPad, comaPad], {align: "stretch"})
+  </script>
+
+  <script id="14" type="text/x-typescript">
+    const focus = Generators.input(defocusFields)
+  </script>
+  <script id="14b" type="text/x-typescript">
+    const astigmatism = Generators.input(astigmatismPad)
+  </script>
+  <script id="14c" type="text/x-typescript">
+    const coma = Generators.input(comaPad)
+  </script>
+  <script id="15" type="text/x-typescript">
+    // Workshop units to Krivanek coefficients: lengths in Angstrom, angles in
+    // radians. `C10 = -defocus`, following abtem — an underfocus is a negative
+    // C10, and getting this backwards mirrors every picture on this page.
+    //
+    // The pads report their angle in the same `phi` convention `chi` expects,
+    // measured from the first array axis towards the second, so it goes across
+    // unchanged apart from degrees to radians.
+    const aberrations = ({
+      C10: -focus.defocus * 10,
+      C12: astigmatism.magnitude * 10,
+      phi12: (astigmatism.angle * Math.PI) / 180,
+      C21: coma.magnitude * 1e4,
+      phi21: (coma.angle * Math.PI) / 180
+    })
+  </script>
+
+  <script id="16" type="text/x-typescript">
+    const grid = angularSpatialFrequencies([n, n], sampling, wavelength)
+  </script>
+  <script id="17" type="text/x-typescript">
+    const apertureArray = softAperture(
+      grid.alpha, grid.phi, semiangle, angularSampling([n, n], sampling, wavelength)
+    )
+  </script>
+  <script id="18" type="text/x-typescript">
+    const probe = complexProbe({
+      gpts: [n, n], sampling, energy, semiangleCutoff: semiangle, aberrations
+    })
+  </script>
+  <script id="19" type="text/x-typescript">
+    const reciprocalSampling = 1 / (n * sampling[0])
+  </script>
+  <script id="20" type="text/x-typescript">
+    // mrad per pixel, for the readout.
+    const mradPerPixel = reciprocalSampling * wavelength * 1e3
+  </script>
+
+  <script id="21" type="text/x-typescript">
+    // The two picked points, held outside the reactive graph.
+    //
+    // A cell that rebuilds DOM must not read a value that changes while the
+    // pointer is down — the panel would be torn out from under the drag. So the
+    // markers live in a plain object, and the cell that knows how to draw
+    // installs a `repaint` on it.
+    const picked = ({
+      kRow: 0,
+      kCol: Math.round(0.45 * radiusPixels),
+      qRow: 0,
+      qCol: Math.round(1.4 * radiusPixels),
+      repaint: () => {}
+    })
+  </script>
+
+  <script id="22" type="text/x-typescript">
+    // Width of the control column beside the panels. Fixed rather than
+    // content-sized: a range input has no natural width, so a stretch column
+    // lets it grow to whatever is going, and the panels then wrap underneath.
+    const controlWidth = 150
+  </script>
+  <script id="22b" type="text/x-typescript">
+    const panelSize = Math.max(190, Math.min(300, Math.floor((width - controlWidth - 46) / 2)))
+  </script>
+
+  <script id="23" type="text/x-typescript">
+    // A canvas with an SVG layer above it for the geometry, and a caption.
+    // Built once per size change and never in response to a drag.
+    const makePanel = (name, label, hint) => {
+      const canvas = htl.html`<canvas style="
+        width:${panelSize}px;height:${panelSize}px;display:block;
+        border-radius:4px;cursor:crosshair;touch-action:none;">`;
+      // `overflow: visible` so a label close to an edge is not cut in half. The
+      // aperture circles do have to stop at the edge, though — a displaced
+      // aperture reaches well outside the panel and would otherwise be drawn
+      // over the caption and the panel beside it — so they go in a clipped
+      // group instead. The id only has to be unique inside this notebook's own
+      // shadow root.
+      const clipId = `${name}-clip`;
+      const overlay = htl.svg`<svg
+        width=${panelSize} height=${panelSize}
+        style="position:absolute;inset:0;pointer-events:none;overflow:visible;">
+        <defs><clipPath id=${clipId}>
+          <rect x="0" y="0" width=${panelSize} height=${panelSize} rx="4"></rect>
+        </clipPath></defs>
+      </svg>`;
+      const node = htl.html`<figure style="margin:0;width:${panelSize}px;">
+        <div style="position:relative;width:${panelSize}px;height:${panelSize}px;">
+          ${canvas}${overlay}
+        </div>
+        <figcaption style="font-size:12px;text-align:center;margin-top:5px;opacity:0.75;">
+          ${label}<br><span style="opacity:0.7;">${hint}</span>
+        </figcaption>
+      </figure>`;
+      return {canvas, overlay, node, clipId, defs: overlay.firstElementChild};
+    }
+  </script>
+  <script id="24" type="text/x-typescript">
+    const detectorPanel = makePanel("detector", "over the detector, at fixed q", "drag to pick k")
+  </script>
+  <script id="25" type="text/x-typescript">
+    const frequencyPanel = makePanel("frequency", "over spatial frequency, at fixed k", "drag to pick q")
+  </script>
+  <script id="25b" type="text/x-typescript">
+    const panelRow = row([detectorPanel.node, frequencyPanel.node], {gap: 16})
+  </script>
+  <script id="25c" type="text/x-typescript">
+    // Controls down the left, panels to their right. Both columns hold their
+    // own width rather than sharing the row's, so the panels do not shrink to
+    // make room for a label.
+    const widget = (() => {
+      const left = column([controlFields], {align: "stretch"});
+      left.style.flex = `0 0 ${controlWidth}px`;
+      left.style.width = `${controlWidth}px`;
+      const right = column([panelRow], {align: "stretch"});
+      right.style.flex = "0 0 auto";
+      const node = row([left, right], {gap: 18});
+      node.style.justifyContent = "flex-start";
+      node.style.alignItems = "flex-start";
+      return node;
+    })()
+  </script>
+
+  <script id="26" type="text/x-typescript">
+    // Display position of a signed frequency index, in panel pixels. The array
+    // is shifted before drawing, so frequency zero sits at the centre; the first
+    // axis runs down the panel and the second across it.
+    const toXY = (fRow, fCol) => ({
+      x: ((fCol + n / 2 + 0.5) / n) * panelSize,
+      y: ((fRow + n / 2 + 0.5) / n) * panelSize
+    })
+  </script>
+  <script id="27" type="text/x-typescript">
+    const flatIndex = (fRow, fCol) =>
+      (((Math.round(fRow) % n) + n) % n) * n + (((Math.round(fCol) % n) + n) % n)
+  </script>
+
+  <script id="28" type="text/x-typescript">
+    // Pointer handling. Attached once; it only mutates `picked` and asks for a
+    // repaint, so dragging never re-runs a cell.
+    const wiring = (() => {
+      const drag = (panel, assign) => {
+        const move = (event) => {
+          const {ix, iy, inside} = pointerToIndices(event, panel.canvas, n, n);
+          if (!inside) return;
+          assign(ix - n / 2, iy - n / 2);
+          picked.repaint();
+        };
+        panel.canvas.addEventListener("pointerdown", (event) => {
+          panel.canvas.setPointerCapture(event.pointerId);
+          move(event);
+        });
+        // Only while a button is held. Tracking a bare hover would mean the
+        // marker follows the pointer on its way to anything else on the page,
+        // and there are two markers here that set each other's panel, so a
+        // passing cursor would redraw both.
+        panel.canvas.addEventListener("pointermove", (event) => {
+          if (event.buttons > 0) move(event);
+        });
+      };
+
+      drag(detectorPanel, (fRow, fCol) => {
+        picked.kRow = fRow;
+        picked.kCol = fCol;
+      });
+      drag(frequencyPanel, (fRow, fCol) => {
+        picked.qRow = fRow;
+        picked.qCol = fCol;
+      });
+      return true;
+    })()
+  </script>
+
+  <script id="29" type="text/x-typescript">
+    const readout = badge()
+  </script>
+
+  <script id="30" type="text/x-typescript">
+    // The drawing. Depends on the probe and the panel size, so it re-runs when
+    // an aberration slider moves or the page resizes — but it only writes into
+    // DOM that already exists.
+    const painter = (() => {
+      const shifted = complex(n * n);
+      const svgNS = "http://www.w3.org/2000/svg";
+
+      const el = (name, attrs) => {
+        const node = document.createElementNS(svgNS, name);
+        for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+        return node;
+      };
+
+      const marker = (fRow, fCol, colour) => {
+        const {x, y} = toXY(fRow, fCol);
+        return [
+          el("circle", {cx: x, cy: y, r: 5.5, fill: "none", stroke: colour, "stroke-width": 2}),
+          el("circle", {cx: x, cy: y, r: 1.5, fill: colour})
+        ];
+      };
+
+      const label = (fRow, fCol, text, dy = 0) => {
+        const {x, y} = toXY(fRow, fCol);
+        const node = el("text", {
+          x, y: y + dy, "text-anchor": "middle", "dominant-baseline": "middle",
+          "font-size": 10, fill: "white", "paint-order": "stroke",
+          stroke: "rgba(0,0,0,0.55)", "stroke-width": 3, "stroke-linejoin": "round"
+        });
+        node.textContent = text;
+        return node;
+      };
+
+      // Where a region actually is, rather than where the geometry says it
+      // should be. Aberrations do not move the regions, but an asymmetric
+      // aperture would, and the centroid costs one pass over the mask.
+      const regionExtent = (mask, want) => {
+        let rows = 0;
+        let cols = 0;
+        let count = 0;
+        let topRow = Infinity;
+        for (let a = 0; a < n; a++) {
+          const fRow = a < n / 2 ? a : a - n;
+          for (let b = 0; b < n; b++) {
+            if (mask[a * n + b] !== want) continue;
+            const fCol = b < n / 2 ? b : b - n;
+            rows += fRow;
+            cols += fCol;
+            count += 1;
+            if (fRow < topRow) topRow = fRow;
+          }
+        }
+        return count === 0 ? null : {row: rows / count, col: cols / count, topRow};
+      };
+
+      // `fftshiftComplex` returns a new array rather than shifting in place, so
+      // the result has to be the thing that gets drawn. Ignoring it leaves the
+      // image corner-centered under a centred overlay, and the overlap regions
+      // appear in the corners.
+      const draw = (panel, field) => {
+        const centred = fftshiftComplex(field, n, n);
+        blit(panel.canvas, complexToRGB(centred, {vmin: 0, vmax: 1}), n, n, {size: panelSize});
+      };
+
+      const repaint = () => {
+        const kIndex = flatIndex(picked.kRow, picked.kCol);
+        const qIndex = flatIndex(picked.qRow, picked.qCol);
+
+        // Left: the detector plane at the picked spatial frequency.
+        draw(detectorPanel, overlapFunctionAtQ(probe, n, qIndex, shifted));
+
+        const radius = (radiusPixels / n) * panelSize;
+        const centre = toXY(0, 0);
+
+        // The aperture outlines, inside a clipped group: a displaced aperture
+        // reaches a long way past the edge of the panel.
+        const apertures = el("g", {"clip-path": `url(#${detectorPanel.clipId})`});
+        apertures.appendChild(el("circle", {
+          cx: centre.x, cy: centre.y, r: radius, fill: "none",
+          stroke: "rgba(255,255,255,0.75)", "stroke-width": 1.2, "stroke-dasharray": "4 3"
+        }));
+        for (const sign of [1, -1]) {
+          const c = toXY(sign * picked.qRow, sign * picked.qCol);
+          apertures.appendChild(el("circle", {
+            cx: c.x, cy: c.y, r: radius, fill: "none",
+            stroke: "rgba(255,255,255,0.45)", "stroke-width": 1.2, "stroke-dasharray": "2 4"
+          }));
+        }
+        const detectorMarks = [apertures];
+
+        // Name the regions where they are rather than in a legend, sitting each
+        // label just above its region so it does not end up underneath the
+        // marker when k is dragged into the middle of a lens.
+        const regions = overlapRegions(apertureArray, n, qIndex);
+        const extents = [
+          [regionExtent(regions.double, 1), "double"],
+          [regionExtent(regions.double, 2), "double"],
+          [regionExtent(regions.triple, 1), "triple"]
+        ];
+        for (const [extent, text] of extents) {
+          if (extent) detectorMarks.push(label(extent.topRow, extent.col, text, -9));
+        }
+        const hasDouble = Boolean(extents[0][0] || extents[1][0]);
+        const hasTriple = Boolean(extents[2][0]);
+        detectorMarks.push(...marker(picked.kRow, picked.kCol, UI.bright));
+        // The `<defs>` holding the clip path has to survive the redraw.
+        detectorPanel.overlay.replaceChildren(detectorPanel.defs, ...detectorMarks);
+
+        // Right: spatial frequency at the picked detector pixel.
+        draw(frequencyPanel, overlapFunction(probe, n, n, kIndex, shifted));
+        const limit = el("g", {"clip-path": `url(#${frequencyPanel.clipId})`});
+        limit.appendChild(el("circle", {
+          cx: centre.x, cy: centre.y, r: 2 * radius, fill: "none",
+          stroke: "rgba(255,255,255,0.6)", "stroke-width": 1.2, "stroke-dasharray": "4 3"
+        }));
+        frequencyPanel.overlay.replaceChildren(
+          frequencyPanel.defs,
+          limit,
+          // At the top of the circle rather than beside it: placed on the left
+          // the text runs off the panel, because the circle nearly fills it.
+          label(-2 * radiusPixels, 0, "2α", -8),
+          ...marker(picked.qRow, picked.qCol, UI.bright)
+        );
+
+        const qMagnitude = Math.hypot(picked.qRow, picked.qCol) * reciprocalSampling;
+        const kMagnitude = Math.hypot(picked.kRow, picked.kCol) * mradPerPixel;
+        readout.textContent =
+          `|q| = ${qMagnitude.toFixed(2)} Å⁻¹` +
+          ` · |k| = ${kMagnitude.toFixed(1)} mrad` +
+          ` · ${hasTriple ? "double and triple overlap" : hasDouble ? "double overlap only" : "no overlap: beyond 2α"}`;
+      };
+
+      picked.repaint = repaint;
+      repaint();
+      return repaint;
+    })()
+  </script>
+</notebook>

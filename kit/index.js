@@ -40,3 +40,5 @@ export * from "./detectors.js";
 export * from "./paraxial.js";
 export * from "./nonparaxial.js";
 export * from "./projections.js";
+export * from "./ptycho.js";
+export * from "./ptycho-sim.js";

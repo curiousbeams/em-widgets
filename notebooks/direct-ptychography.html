@@ -1,0 +1,814 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Direct ptychography</title>
+  <script id="1" type="text/markdown">
+    # One pipeline, four direct methods
+  </script>
+  <script id="2" type="text/markdown">
+    Single-sideband ptychography, optimum bright-field STEM, parallax imaging and
+    integrated centre of mass are usually introduced one at a time, as separate
+    techniques with separate derivations. They are the same calculation. Each one
+    loops over the pixels of the bright-field disc and, for every pixel, does
+    this:
+
+    ${tex.block`\begin{aligned} G(\mathbf{q}) &\leftarrow \mathcal{F}_{\mathbf{r}\rightarrow\mathbf{q}}\left[I_{\mathrm{BF}}(\mathbf{r})\right] \\ I'(\mathbf{r}) &\mathrel{+}= \mathrm{Re}\left\{\mathcal{F}^{-1}\left[G(\mathbf{q})\,H(\mathbf{q})\right]\right\} \end{aligned}`}
+
+    The only thing that differs between them is the kernel ${tex`H`}, and
+    **changing the method changes exactly one panel in the diagram.**
+
+    **Press play** to walk out through the bright-field disc, one pixel at a
+    time, starting on the optic axis. While paused you can **click anywhere in
+    the disc** to reconstruct from every pixel out to that angle. The low angles
+    carry the coarse structure, so the specimen arrives as a blur and sharpens.
+
+    The data is simulated, so the electron dose is a control — and dose is what
+    separates these methods, since at high dose they are nearly interchangeable.
+    Each specimen is a projected potential scaled to a weak phase object, about
+    0.09 rad root-mean-square, which is the regime these linear methods are
+    derived for.
+
+    **sub-sampling** is how much coarser the scan is than the reconstruction. At
+    4× the probe visits every fourth pixel, so each virtual bright-field image is
+    aliased, and its spectrum is tiled four times per axis to give the kernel the
+    room to undo that. The reconstruction lands on the specimen's own grid either
+    way; a finer scan simply measures more of it directly.
+  </script>
+
+  <script id="3" type="text/x-typescript">
+    const controlsView = display(controlPanel);
+  </script>
+  <script id="3d" type="text/x-typescript">
+    const pipelineView = display(flow.node);
+  </script>
+  <script id="3e" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="4" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength, angularSpatialFrequencies,
+      complexProbe, chi,
+      complex, ifft2, fftshift, fftshiftComplex,
+      applyColormap, complexToRGB, histogramScaling, cropCenter,
+      blit, drawScalebar, pointerToIndices, currentColor,
+      brightFieldIndices, overlapFunction, overlapSums, tileSpectrum,
+      directAccumulator, accumulatePixel, directImage, parallaxShifts,
+      directSSNR, PTYCHO_LABELS,
+      forwardModel, scanSpectra, spectrumAt,
+      controls as gridControls, badge, row, flowDiagram, toggleButton,
+      SERIES, frames, whenVisible, qualityBudget
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="4b" type="text/x-typescript" pinned="">
+    // `data.js` is not re-exported from the kit index, so that widgets which
+    // load nothing never pull in its dependencies.
+    import {resolveAsset} from "https://curiousbeams.github.io/em-widgets/kit/data.js"
+  </script>
+
+  <!-- Geometry -->
+  <script id="5" type="text/x-typescript" pinned="">
+    // Object, detector and reconstruction all share this grid. The scan is a
+    // sub-sampling of it and tiling brings the reconstruction back onto it, so
+    // there is only ever one grid to think about.
+    const n = 96
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    // Aperture radius in pixels, just under a quarter of the grid. That puts the
+    // edge of the diffraction pattern at about twice the semiangle, which is
+    // where the overlap function stops and so as far as any of these methods
+    // look.
+    //
+    // Just under rather than exactly: `overlapFunction` reads the displaced
+    // probes at wrapped indices, and at exactly a quarter a frequency pushed off
+    // one edge lands back precisely on the far rim of the aperture, where a soft
+    // edge is still half open.
+    const radiusPixels = Math.floor(n / 4) - 1
+  </script>
+  <script id="8b" type="text/x-typescript" pinned="">
+    // The kernels, as the reader picks them. Parallax appears twice because the
+    // phase flip changes what you see so completely — contrast reversals with it
+    // off — that it reads as a different method rather than a setting on one.
+    //
+    // It does not change the signal-to-noise, though: the flip corrects the sign
+    // of the transfer function without adding anything to it, so both variants
+    // share a curve in the plot below.
+    // `label` is spelled out for the radio, which has the full width of the
+    // widget; `short` is for the readout and the plot legend, which do not.
+    const KERNELS = ({
+      ssb: {method: "ssb", label: "single sideband", short: "SSB"},
+      obf: {method: "obf", label: "optimum bright field", short: "OBF"},
+      parallax: {method: "parallax", flip: false, label: "parallax", short: "parallax"},
+      parallaxFlip: {
+        method: "parallax", flip: true, label: "phase-flipped parallax", short: "parallax (flipped)"
+      },
+      icom: {method: "icom", label: "integrated centre of mass", short: "iCOM"}
+    })
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    // The three specimens, each a projected potential binned to the grid and
+    // scaled to the same weak phase. They differ by an order of magnitude in
+    // field of view, so each one sets its own sampling — and with it its own
+    // semiangle, resolution and sensible defocus.
+    const SPECIMENS = ({
+      apoF: {label: "apoferritin", file: "apoF-potential.f32", extent: 192.0},
+      mof: {label: "MOF", file: "mof-potential.f32", extent: 44.8},
+      sto: {label: "SrTiO₃", file: "sto-potential.f32", extent: 23.67}
+    })
+  </script>
+
+  <!-- Controls -->
+  <script id="10" type="text/x-typescript">
+    const kernelInput = Inputs.radio(Object.keys(KERNELS), {
+      value: "ssb", label: "kernel", format: (k) => KERNELS[k].label
+    })
+  </script>
+  <script id="10b" type="text/x-typescript">
+    const specimenInput = Inputs.radio(Object.keys(SPECIMENS), {
+      value: "apoF", label: "specimen", format: (k) => SPECIMENS[k].label
+    })
+  </script>
+  <script id="10c" type="text/x-typescript">
+    const subsamplingInput = Inputs.select([4, 2, 1], {value: 4, label: "scan sub-sampling ×"})
+  </script>
+  <script id="10d" type="text/x-typescript">
+    const doseInput = Inputs.select([1e2, 1e3, 1e4, 1e5, Infinity], {
+      value: 1e4, label: "dose (e⁻/Å²)",
+      format: (d) => (Number.isFinite(d) ? d.toExponential(0) : "noiseless")
+    })
+  </script>
+  <script id="10e" type="text/x-typescript">
+    // A stable host for the one control that has to be rebuilt: the defocus
+    // range depends on the specimen, and swapping the slider inside a host keeps
+    // the surrounding grid untouched.
+    const defocusHost = htl.html`<div></div>`
+  </script>
+  <script id="11" type="text/x-typescript">
+    // Debounced and per field: a cell reading `form.value.x` would depend on the
+    // whole form and re-run when any other control moved, which for the ones
+    // that re-simulate means a second of work thrown away.
+    const settled = (input, quiet = 140) => Generators.observe((notify) => {
+      let last = input.value;
+      let timer;
+      const emit = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (input.value !== last) {
+            last = input.value;
+            notify(last);
+          }
+        }, quiet);
+      };
+      notify(last);
+      input.addEventListener("input", emit);
+      return () => {
+        clearTimeout(timer);
+        input.removeEventListener("input", emit);
+      };
+    })
+  </script>
+  <script id="12" type="text/x-typescript">
+    const specimen = settled(specimenInput)
+  </script>
+  <script id="13" type="text/x-typescript">
+    const subsampling = settled(subsamplingInput)
+  </script>
+  <script id="14" type="text/x-typescript">
+    const kernel = settled(kernelInput)
+  </script>
+  <script id="14b" type="text/x-typescript">
+    const method = KERNELS[kernel].method
+  </script>
+  <script id="14c" type="text/x-typescript">
+    const flip = KERNELS[kernel].flip ?? false
+  </script>
+
+  <script id="15" type="text/x-typescript">
+    const sampling = ([SPECIMENS[specimen].extent / n, SPECIMENS[specimen].extent / n])
+  </script>
+  <script id="16" type="text/x-typescript">
+    const dk = 1 / SPECIMENS[specimen].extent
+  </script>
+  <script id="17" type="text/x-typescript">
+    const semiangle = radiusPixels * dk * wavelength * 1e3
+  </script>
+  <script id="18" type="text/x-typescript">
+    // Defocus measured in zero crossings of the parallax transfer function.
+    //
+    // That function goes as `sin[chi(q)]`, so it changes sign every time `chi`
+    // passes a multiple of pi, and the count of crossings inside the transfer
+    // limit is the honest measure of how much defocus there is. Two of them is
+    // enough to see contrast reversal without the picture becoming a comb, and
+    // is the default; the slider reaches six.
+    //
+    // In nanometres this is a couple for strontium titanate and a few hundred
+    // for apoferritin, which is why the range follows the specimen rather than
+    // being fixed in advance.
+    const defocusFor = (crossings) => {
+      const qMax = 2 * radiusPixels * dk;
+      return crossings / (wavelength * qMax * qMax) / 10;   // Angstrom -> nm
+    }
+  </script>
+  <script id="19" type="text/x-typescript">
+    // Rebuilt when the specimen changes, because its range is in nanometres and
+    // the same number of zero crossings is two nanometres for one specimen and
+    // five hundred for another. Changing specimen is a click rather than a drag,
+    // and the slider lives in a host, so nothing is torn out mid-gesture.
+    const defocusInput = (() => {
+      const input = Inputs.range([-defocusFor(6), defocusFor(6)], {
+        value: defocusFor(2.5), step: defocusFor(6) / 100, label: "defocus (nm)"
+      });
+      defocusHost.replaceChildren(input);
+      return input;
+    })()
+  </script>
+  <script id="21" type="text/x-typescript">
+    const defocus = settled(defocusInput)
+  </script>
+  <script id="22" type="text/x-typescript">
+    const dose = settled(doseInput)
+  </script>
+  <script id="23" type="text/x-typescript">
+    // `C10 = -defocus`, following abtem.
+    const aberrations = ({C10: -defocus * 10})
+  </script>
+
+  <!-- Specimen and probe -->
+  <script id="24" type="text/x-typescript">
+    // Phase shift in radians, already mean subtracted and scaled when the file
+    // was written. Raw little-endian float32: one fetch, no decoding.
+    const objectPhase = await (async () => {
+      const url = resolveAsset(
+        `https://curiousbeams.github.io/em-widgets/data/${SPECIMENS[specimen].file}`
+      );
+      const buffer = await (await fetch(url)).arrayBuffer();
+      return Float64Array.from(new Float32Array(buffer));
+    })()
+  </script>
+  <script id="25" type="text/x-typescript">
+    const grid = angularSpatialFrequencies([n, n], sampling, wavelength)
+  </script>
+  <script id="26" type="text/x-typescript">
+    // Ordered by scattering angle, so consuming them in order walks out from the
+    // optic axis and a click in the disc selects a prefix of this list.
+    const bfIndices = brightFieldIndices(grid.alpha, semiangle, "radial")
+  </script>
+  <script id="27" type="text/x-typescript">
+    const probe = complexProbe({
+      gpts: [n, n], sampling, energy, semiangleCutoff: semiangle, aberrations
+    })
+  </script>
+  <script id="28" type="text/x-typescript">
+    const probeReal = ifft2({re: Float64Array.from(probe.re), im: Float64Array.from(probe.im)}, n, n)
+  </script>
+
+  <!-- The reconstruction grid: the scan, tiled back up to the specimen's grid -->
+  <script id="29" type="text/x-typescript">
+    const m = n / subsampling
+  </script>
+  <script id="30" type="text/x-typescript">
+    const Q = m * subsampling
+  </script>
+  <script id="31" type="text/x-typescript">
+    const kernelContext = (() => {
+      const chiQ = chi(grid.alpha, grid.phi, wavelength, aberrations);
+      const qRow = new Float64Array(Q * Q);
+      const qCol = new Float64Array(Q * Q);
+      const inverseQ2 = new Float64Array(Q * Q);
+      const phaseFlip = new Float64Array(Q * Q);
+      for (let a = 0; a < Q; a++) {
+        for (let b = 0; b < Q; b++) {
+          const i = a * Q + b;
+          qRow[i] = a < Q / 2 ? a : a - Q;
+          qCol[i] = b < Q / 2 ? b : b - Q;
+          const q2 = qRow[i] * qRow[i] + qCol[i] * qCol[i];
+          // The iCOM kernel divides by |q|^2, so the origin is handled rather
+          // than left to produce a not-a-number that would spread over the whole
+          // image at the first inverse transform.
+          inverseQ2[i] = q2 > 0 ? 1 / q2 : 0;
+          phaseFlip[i] = Math.sign(Math.sin(chiQ[i])) || 1;
+        }
+      }
+      return {qRow, qCol, inverseQ2, phaseFlip, shifts: parallaxShifts(chiQ, n, dk, sampling[0])};
+    })()
+  </script>
+
+  <!-- Run state -->
+  <script id="32" type="text/x-typescript">
+    // A fresh scan whenever the specimen, the probe, the dose or the scan
+    // sampling changes.
+    const run = (() => {
+      // A new scan means the old reconstruction describes nothing, so playback
+      // goes back to a stopped state rather than carrying a reader through a
+      // transition they did not ask for. The accumulator is rebuilt by the cell
+      // below, which zeroes the image itself.
+      if (playButton.value) {
+        playButton.value = false;
+        playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+      }
+      const model = forwardModel({objectPhase, probeReal, n, m, bfIndices, dose, sampling});
+      return {model, spectra: null};
+    })()
+  </script>
+  <script id="33" type="text/x-typescript">
+    // A fresh accumulator whenever the kernel or the grid changes — but not a
+    // fresh scan, since the simulated data does not depend on the kernel.
+    //
+    // `limit` is how far through the bright-field list to go: the whole list
+    // while playing, or wherever the reader last clicked.
+    const accumulation = (() => {
+      run;
+      method;
+      Q;
+      flip;
+      return {acc: directAccumulator(Q), next: 0, limit: 1, image: new Float64Array(Q * Q)};
+    })()
+  </script>
+
+  <!-- Playback -->
+  <script id="34" type="text/x-typescript">
+    const playButton = toggleButton({on: "⏸ pause", off: "▶ play", value: false})
+  </script>
+  <script id="35" type="text/x-typescript">
+    // Deliberately not a `Generators.input` cell.
+    //
+    // Reading the button's own value inside the loop keeps the two in step. A
+    // reactive `running` arrives a tick after the button changes, and the frame
+    // loop — which would then have it as a dependency — gets one pass with the
+    // old value. That was enough for a scan reset to run itself to completion
+    // while playback said it was stopped. It also means play and pause no
+    // longer tear the loop down and rebuild it.
+    const isRunning = () => playButton.value
+  </script>
+  <script id="36" type="text/x-typescript">
+    // Plain bars rather than `<progress>`, so they can be styled with the widget
+    // and say what they are counting.
+    //
+    // Two of them, because they count unrelated things: one is the experiment
+    // being simulated, which happens once and then never again until a
+    // parameter changes, and the other is how far through the bright-field disc
+    // the reconstruction has got, which the reader drives.
+    const meter = (colour, width) => {
+      const fill = htl.html`<div style="height:100%;width:0%;background:${colour};
+        border-radius:3px;transition:width 100ms linear;"></div>`;
+      const track = htl.html`<div style="height:6px;width:${width}px;border-radius:3px;
+        background:var(--theme-foreground-faintest, rgba(128,128,128,0.25));
+        overflow:hidden;flex:0 0 auto;">${fill}</div>`;
+      const label = htl.html`<span style="font-size:11px;white-space:nowrap;
+        color:var(--theme-foreground-muted, inherit);"></span>`;
+      const node = row([track, label], {gap: 8});
+      node.style.justifyContent = "flex-start";
+      node.style.flex = "0 0 auto";
+      // `row` wraps by default, which put the play button on its own line as
+      // soon as the meter beside it grew past the column. It also aligns to the
+      // top, which left the six-pixel track riding above its own caption.
+      node.style.flexWrap = "nowrap";
+      node.style.alignItems = "center";
+      node.set = (fraction, text) => {
+        fill.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
+        label.textContent = text;
+      };
+      return node;
+    }
+  </script>
+  <script id="36b" type="text/x-typescript">
+    const simulationMeter = meter(SERIES[2], 64)
+  </script>
+  <script id="36c" type="text/x-typescript">
+    const brightFieldMeter = meter(SERIES[0], 64)
+  </script>
+  <script id="37" type="text/x-typescript">
+    // Three columns and three rows: the kernel across the top, then the two
+    // controls that re-simulate beside the bar that reports it, then the two
+    // that only re-weight beside the playback that walks through the disc.
+    //
+    // Element references only — the defocus slider arrives through its host —
+    // so this is built once and never rebuilt under a gesture.
+    const controlPanel = (() => {
+      const node = gridControls(document.createElement("div"), {columns: 3, compact: true});
+      node.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      node.style.rowGap = "6px";
+
+      const place = (child, row, column) => {
+        const cell = document.createElement("div");
+        cell.style.gridRow = String(row);
+        cell.style.gridColumn = column;
+        cell.style.minWidth = "0";
+        cell.appendChild(child);
+        node.appendChild(cell);
+        return cell;
+      };
+
+      // A meter is one line tall against controls that are two: a label above an
+      // input. Padding the cell by the label's height drops the meter alongside
+      // the input rather than floating it in the middle of the row, and a fixed
+      // inner height centres it on the input itself.
+      const meterCell = (child, row) => {
+        const inner = document.createElement("div");
+        inner.style.display = "flex";
+        inner.style.alignItems = "center";
+        inner.style.minHeight = "26px";
+        inner.appendChild(child);
+        const cell = place(inner, row, "3");
+        cell.style.paddingTop = "17px";
+        return cell;
+      };
+
+      place(kernelInput, 1, "1 / -1");
+      place(specimenInput, 2, "1");
+      place(subsamplingInput, 2, "2");
+      meterCell(simulationMeter, 2);
+      place(defocusHost, 3, "1");
+      place(doseInput, 3, "2");
+      // The button goes last so the two bars start at the same x and read as a
+      // pair, rather than one being pushed across by the button beside it.
+      const play = row([brightFieldMeter, playButton], {gap: 12});
+      play.style.flexWrap = "nowrap";
+      play.style.alignItems = "center";
+      meterCell(play, 3);
+      return node;
+    })()
+  </script>
+  <script id="38" type="text/x-typescript">
+    const readout = badge()
+  </script>
+
+  <!-- Layout -->
+  <script id="39" type="text/x-typescript">
+    const panelSize = Math.max(70, Math.min(128, Math.floor((width - 4 * 44 - 20) / 6)))
+  </script>
+  <script id="40" type="text/x-typescript">
+    // Built once and filled from another cell, so replacing the plot never
+    // rebuilds the diagram around it.
+    const ssnrHost = htl.html`<div></div>`
+  </script>
+  <script id="41" type="text/x-typescript">
+    const flow = flowDiagram(
+      [
+        {key: "detector", label: "bright-field pixel k", width: panelSize, height: panelSize,
+         row: 0, column: 0, cursor: "crosshair"},
+        {key: "virtual", label: "virtual BF image", width: panelSize, height: panelSize, row: 0, column: 1},
+        {key: "spectrum", label: "G(q)", width: panelSize, height: panelSize, row: 0, column: 2},
+        {key: "contribution", label: "this pixel's share", width: panelSize, height: panelSize, row: 0, column: 3},
+        {key: "sum", label: "reconstructed phase", width: panelSize * 2, height: panelSize * 2,
+         row: 0, column: 4, rowSpan: 2},
+        // The space under the first three panels, which would otherwise be empty.
+        {key: "ssnr", content: ssnrHost, row: 1, column: 0, colSpan: 3},
+        {key: "kernel", label: "H(q) — the kernel", width: panelSize, height: panelSize, row: 1, column: 3}
+      ],
+      [
+        {from: "detector", to: "virtual", label: "pick k"},
+        {from: "virtual", to: "spectrum", label: "FFT"},
+        {from: "spectrum", to: "contribution", label: "inv. FFT"},
+        // Into G(q), because that is what the kernel multiplies — the panel to
+        // the right of it is what comes back out after the inverse transform.
+        //
+        // The elbow anchors on the canvases, so its corner has to sit in the
+        // band between the captions under the top row and the plot below. A
+        // third of the way up from the kernel puts it there; further and it runs
+        // through the captions.
+        {from: "kernel", to: "spectrum", label: "× H(q)", route: "v", bias: 0.36},
+        {from: "contribution", to: "sum", label: "+"}
+      ],
+      {gap: 44}
+    )
+  </script>
+  <script id="42" type="text/x-typescript">
+    const visible = whenVisible(flow.node)
+  </script>
+
+  <!-- Picking a bright-field angle -->
+  <script id="43" type="text/x-typescript">
+    // Clicking the detector panel while paused rebuilds the sum from every
+    // bright-field pixel out to that angle. The list is ordered by angle, so
+    // "out to here" is a prefix of it.
+    const picking = (() => {
+      const canvas = flow.panels.get("detector").canvas;
+      canvas.addEventListener("pointerdown", (event) => {
+        if (isRunning()) return;
+        const box = 4 * radiusPixels;
+        const {ix, iy, inside} = pointerToIndices(event, canvas, box, box);
+        if (!inside) return;
+        const radius = Math.hypot(ix - box / 2, iy - box / 2);
+
+        let count = 0;
+        while (count < bfIndices.length) {
+          const k = bfIndices[count];
+          const kRow = (k / n) | 0;
+          const kCol = k % n;
+          const angle = Math.hypot(
+            kRow < n / 2 ? kRow : kRow - n,
+            kCol < n / 2 ? kCol : kCol - n
+          );
+          if (angle > radius) break;
+          count++;
+        }
+
+        accumulation.limit = Math.max(1, count);
+        // Going inwards means unpicking contributions, which the running sum
+        // cannot do, so it starts again. A full sweep is a few hundred
+        // milliseconds, spread over the next handful of frames.
+        if (accumulation.limit < accumulation.next) {
+          accumulation.acc = directAccumulator(Q);
+          accumulation.next = 0;
+        }
+      });
+      return true;
+    })()
+  </script>
+
+  <!-- The loop -->
+  <script id="44" type="text/x-typescript" pinned="">
+    const frame = (function* () {
+      const panel = (key) => flow.panels.get(key);
+      const gammaBuffer = complex(Q * Q);
+      const spectrum = complex(m * m);
+      const tiled = complex(Q * Q);
+      const budget = qualityBudget({min: 1, max: 96, slowMs: 14, fastMs: 9});
+      const box = 4 * radiusPixels;
+
+      const contextFor = (kIndex) => ({
+        kRow: ((kIndex / n) | 0) < n / 2 ? (kIndex / n) | 0 : ((kIndex / n) | 0) - n,
+        kCol: kIndex % n < n / 2 ? kIndex % n : (kIndex % n) - n,
+        qRow: kernelContext.qRow,
+        qCol: kernelContext.qCol,
+        inverseQ2: kernelContext.inverseQ2,
+        phaseFlip: flip ? kernelContext.phaseFlip : null,
+        shiftRow: kernelContext.shifts.shiftRow[kIndex],
+        shiftCol: kernelContext.shifts.shiftCol[kIndex]
+      });
+
+      const kernelFor = (kIndex) => {
+        overlapFunction(probe, n, Q, kIndex, gammaBuffer);
+        const unit = complex(Q * Q);
+        unit.re.fill(1);
+        const single = directAccumulator(Q);
+        accumulatePixel(single, unit, gammaBuffer, method, contextFor(kIndex));
+        return single.num;
+      };
+
+      const draw = () => {
+        const total = bfIndices.length;
+        const shown = Math.max(0, Math.min(accumulation.next, total) - 1);
+        const kIndex = bfIndices[shown];
+
+        const map = new Float64Array(n * n);
+        for (let j = 0; j < total; j++) map[bfIndices[j]] = j < accumulation.next ? 0.85 : 0.3;
+        map[kIndex] = 1;
+        const cropped = cropCenter(fftshift(map, n, n), n, n, box);
+        // The detector panel is in scattering angle, not length: its width is
+        // four aperture radii, which is four times the semiangle.
+        drawScalebar(
+          blit(panel("detector").canvas,
+            applyColormap(cropped.data, {colormap: "eclipse", vmin: 0, vmax: 1}),
+            cropped.nx, cropped.ny, {size: panelSize}),
+          {extent: 4 * semiangle, units: "mrad"}
+        );
+
+        simulationMeter.set(run.model.progress,
+          run.spectra ? `${m}×${m} scan` : `scanning ${m}×${m}`);
+        brightFieldMeter.set(accumulation.next / total,
+          `${accumulation.next} / ${total} BF`);
+
+        if (!run.spectra) {
+          // The reconstruction from the previous scan describes nothing now, so
+          // the panel shows the empty image rather than a stale picture that
+          // looks like a result.
+          blit(panel("sum").canvas,
+            applyColormap(accumulation.image, {colormap: "gray", vmin: 0, vmax: 1}),
+            Q, Q, {size: panelSize * 2});
+          readout.textContent = `${SPECIMENS[specimen].label} · α = ${semiangle.toFixed(1)} mrad`;
+          return;
+        }
+
+        const virtual = new Float64Array(m * m);
+        for (let i = 0; i < m * m; i++) virtual[i] = run.model.data[shown * m * m + i];
+        drawScalebar(
+          blit(panel("virtual").canvas,
+            applyColormap(histogramScaling(virtual), {colormap: "gray"}),
+            m, m, {size: panelSize}),
+          {extent: SPECIMENS[specimen].extent}
+        );
+
+        spectrumAt(run.spectra, m, shown, spectrum);
+        tileSpectrum(spectrum, m, subsampling, tiled);
+        const logMagnitude = new Float64Array(Q * Q);
+        for (let i = 0; i < Q * Q; i++) {
+          logMagnitude[i] = Math.log1p(Math.hypot(tiled.re[i], tiled.im[i]));
+        }
+        // Reciprocal space: the grid spans Q frequency steps of dk.
+        drawScalebar(
+          blit(panel("spectrum").canvas,
+            applyColormap(fftshift(histogramScaling(logMagnitude), Q, Q), {colormap: "magma"}),
+            Q, Q, {size: panelSize}),
+          {extent: Q * dk, units: "1/Å"}
+        );
+
+        drawScalebar(
+          blit(panel("kernel").canvas,
+            complexToRGB(fftshiftComplex(kernelFor(kIndex), Q, Q), {vmin: 0, vmax: 1}),
+            Q, Q, {size: panelSize}),
+          {extent: Q * dk, units: "1/Å"}
+        );
+
+        const single = directAccumulator(Q);
+        accumulatePixel(single, tiled, gammaBuffer, method, contextFor(kIndex));
+        drawScalebar(
+          blit(panel("contribution").canvas,
+            applyColormap(histogramScaling(directImage(single, method)), {colormap: "PuOr"}),
+            Q, Q, {size: panelSize}),
+          // Dark, because this is the one panel whose colormap is pale in the
+          // middle; a white bar vanishes into it in either theme.
+          {extent: SPECIMENS[specimen].extent, color: "#1a1a1a"}
+        );
+
+        if (accumulation.next > 0) directImage(accumulation.acc, method, {out: accumulation.image});
+        drawScalebar(
+          blit(panel("sum").canvas,
+            applyColormap(histogramScaling(accumulation.image), {colormap: "gray"}),
+            Q, Q, {size: panelSize * 2}),
+          {extent: SPECIMENS[specimen].extent}
+        );
+
+        readout.textContent =
+          `${SPECIMENS[specimen].label} · ${KERNELS[kernel].short}` +
+          ` · α = ${semiangle.toFixed(1)} mrad, resolution ${(1 / (2 * radiusPixels * dk)).toFixed(1)} Å` +
+          ` · scan ${m}×${m} at ${(SPECIMENS[specimen].extent / m).toFixed(2)} Å` +
+          ` → ${Q}×${Q} at ${sampling[0].toFixed(2)} Å`;
+      };
+
+      for (const tick of frames({fps: 30, playing: visible})) {
+        const started = performance.now();
+
+        if (!run.spectra) {
+          if (run.model.step(budget.value) === 0) {
+            run.spectra = scanSpectra(run.model.data, m, bfIndices.length);
+          }
+        } else {
+          // Computed here rather than stored: writing "everything" into `limit`
+          // while playing leaves it there, and the next scan then runs itself to
+          // completion even though playback was reset to stopped.
+          const target = isRunning() ? bfIndices.length : accumulation.limit;
+          if (accumulation.next < target) {
+            const stop = Math.min(target, accumulation.next + Math.max(1, budget.value));
+            for (; accumulation.next < stop; accumulation.next++) {
+              const kIndex = bfIndices[accumulation.next];
+              overlapFunction(probe, n, Q, kIndex, gammaBuffer);
+              spectrumAt(run.spectra, m, accumulation.next, spectrum);
+              tileSpectrum(spectrum, m, subsampling, tiled);
+              accumulatePixel(accumulation.acc, tiled, gammaBuffer, method, contextFor(kIndex));
+            }
+          }
+        }
+
+        budget.report(performance.now() - started);
+        draw();
+        yield tick;
+      }
+    })()
+  </script>
+
+  <!-- Spectral signal to noise -->
+  <script id="45" type="text/x-typescript">
+    // Analytic, from the probe alone — no data needed.
+    //
+    // Signal-to-noise rather than contrast transfer, because it is the quantity
+    // these methods can be judged on together: their transfer functions are
+    // written in different normalisations, and a higher one bought with a
+    // proportionally higher variance is not an improvement.
+    const ssnrCurves = (() => {
+      const aperture = new Float64Array(n * n);
+      const cutoff = semiangle * 1e-3;
+      for (let i = 0; i < n * n; i++) aperture[i] = grid.alpha[i] < cutoff ? 1 : 0;
+      const context = {
+        probe, aperture, n,
+        chiArray: chi(grid.alpha, grid.phi, wavelength, aberrations),
+        sums: overlapSums(probe, n, n, bfIndices),
+        phaseFlip: flip
+      };
+
+      const qMagnitude = new Float64Array(n * n);
+      for (let a = 0; a < n; a++) {
+        for (let b = 0; b < n; b++) {
+          qMagnitude[a * n + b] =
+            Math.hypot(a < n / 2 ? a : a - n, b < n / 2 ? b : b - n) * dk;
+        }
+      }
+
+      const bins = Math.floor(n / 2);
+      const out = [];
+      // Four curves, not five: the phase flip corrects the sign of the transfer
+      // function without adding to it, so both parallax variants share one.
+      for (const name of ["ssb", "obf", "parallax", "icom"]) {
+        const ssnr = directSSNR(name, context, qMagnitude);
+        const totals = new Float64Array(bins);
+        const counts = new Float64Array(bins);
+        for (let i = 0; i < n * n; i++) {
+          const bin = Math.round(qMagnitude[i] / dk);
+          if (bin >= bins) continue;
+          totals[bin] += ssnr[i];
+          counts[bin] += 1;
+        }
+        for (let b = 0; b < bins; b++) {
+          if (counts[b] > 0) {
+            out.push({method: PTYCHO_LABELS[name], q: b * dk, ssnr: totals[b] / counts[b]});
+          }
+        }
+      }
+      return out;
+    })()
+  </script>
+  <script id="46" type="text/x-typescript">
+    const ssnrPlot = (() => {
+      // The scan's own Nyquist frequency: everything to the left of it the
+      // experiment measured directly, everything to the right it has to recover
+      // from aliased content through the tiling. Solid and dotted say which is
+      // which, and the two curves are the same function either side — the split
+      // is about where the data came from, not about the transfer.
+      const nyquist = (m / 2) * dk;
+      const limit = 2 * radiusPixels * dk;
+      const measured = ssnrCurves.filter((d) => d.q <= nyquist);
+      const recovered = ssnrCurves.filter((d) => d.q >= nyquist);
+      // The literal keyword, not a resolved colour. Resolving it against
+      // `document.body` reads the page outside the shadow root, which freezes it
+      // to one grey and leaves it invisible on a dark page; left as-is it is
+      // resolved per element against the widget's own inherited colour, so it
+      // follows the theme.
+      const ink = "currentColor";
+
+      // The legend, drawn inside the plot rather than as a block above it.
+      //
+      // The top right corner of this panel is always empty: every direct method
+      // is bounded by the aperture autocorrelation, which falls linearly from
+      // the aperture semiangle to twice it, so no curve can reach up there.
+      // Putting the key in that space costs nothing and gives the whole of the
+      // panel's height to the plot.
+      const peak = Math.max(...ssnrCurves.map((d) => d.ssnr));
+      const top = peak * 1.14;
+      const names = ["SSB", "OBF", "parallax", "iCOM"];
+      const swatches = names.map((name, i) => ({
+        method: name,
+        x0: limit * 0.72,
+        x1: limit * 0.79,
+        x: limit * 0.81,
+        y: top * (0.97 - i * 0.105)
+      }));
+
+      // Sized to the empty corner: as wide as the first three panels and the two
+      // gaps between them, and reaching up into the row gap above. Its bottom
+      // stays level with the kernel panel; the negative margin is what lets it
+      // grow upwards without moving anything else.
+      //
+      // Sixteen of the forty-four pixel gap, which leaves room for the elbow
+      // carrying the kernel up into G(q) to pass above it.
+      const claimed = 16;
+      ssnrHost.style.marginTop = `${-claimed}px`;
+      ssnrHost.replaceChildren(Plot.plot({
+        width: panelSize * 3 + 2 * 44,
+        height: panelSize + 13 + claimed,
+        marginLeft: 44,
+        marginBottom: 30,
+        marginTop: 6,
+        marginRight: 4,
+        style: {fontSize: "10px"},
+        x: {label: "q (1/Å)", domain: [0, limit]},
+        y: {label: "SSNR", grid: true, labelAnchor: "center", domain: [0, top]},
+        color: {
+          domain: names,
+          range: [SERIES[0], SERIES[1], SERIES[3], ink],
+          legend: false
+        },
+        marks: [
+          Plot.ruleY([0], {strokeOpacity: 0.3}),
+          Plot.ruleX([nyquist], {
+            stroke: ink, strokeOpacity: 0.5, strokeWidth: 1, strokeDasharray: "3,3"
+          }),
+          // Just clear of the axis, where the curves have fallen away but the
+          // iCOM line still runs along zero.
+          Plot.text([{q: nyquist, y: top * 0.09}], {
+            x: "q", y: "y", dx: 4, textAnchor: "start",
+            fontSize: 9, fill: ink, fillOpacity: 0.7,
+            text: () => `scan Nyquist ÷${subsampling}`
+          }),
+          Plot.line(recovered, {
+            x: "q", y: "ssnr", stroke: "method", strokeWidth: 1.4, strokeDasharray: "2,2"
+          }),
+          Plot.line(measured, {x: "q", y: "ssnr", stroke: "method", strokeWidth: 1.8}),
+          Plot.link(swatches, {
+            x1: "x0", x2: "x1", y1: "y", y2: "y", stroke: "method", strokeWidth: 2
+          }),
+          Plot.text(swatches, {
+            x: "x", y: "y", text: "method", fill: "method",
+            textAnchor: "start", fontSize: 9.5
+          })
+        ]
+      }));
+      return ssnrHost;
+    })()
+  </script>
+</notebook>
