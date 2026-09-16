@@ -62,3 +62,27 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
   notebook: "/notebooks/non-paraxial-rays.html"
 }
 :::
+
+## The electron column
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/electron-column.html"
+}
+:::
+
+## Reciprocity
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/reciprocity.html"
+}
+:::
+
+## Projection sets
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/projection-sets.html"
+}
+:::

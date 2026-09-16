@@ -1,0 +1,485 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Projection sets</title>
+  <script id="1" type="text/markdown">
+    # Why phase retrieval needs more than alternating projections
+  </script>
+  <script id="2" type="text/markdown">
+    A feasibility problem asks for a point lying in every one of several sets at
+    once. Phase retrieval is one: the measured intensities are one set, the
+    support and reality constraints another, and the reconstruction is a point
+    in the intersection.
+
+    The obvious method is to project onto each set in turn. It works whenever
+    the sets are convex, and phase-retrieval constraints are not convex. All the
+    algorithms here are the same iteration with different numbers,
+
+    ${tex.block`x_{k+1} \leftarrow (1-a-b)\,x_k + a\,\Pi_1[x_k] + b\,\Pi_2\!\left[c\,\Pi_1[x_k] + (1-c)\,x_k\right]`}
+
+    and the named ones are choices of ${tex`(a,b,c)`}.
+
+    Press **run**. With two straight lines every method finds the crossing. Cut
+    a gap out of each line and **alternating projections** gets caught bouncing
+    between the two ends of a gap, while the **difference map** and its
+    relatives work their way out.
+
+    The trajectory alone does not show this — all four look like a dot wandering
+    about. The plot beside it does: it is the distance from the current point to
+    the sets, and a method that is stuck sits on a flat line forever.
+  </script>
+  <!-- One display cell per piece, so a page can embed whichever it wants:
+       `cells: ["controlsView", "sceneView"]` gives the schematic and its main
+       controls with no parameter sliders and no convergence plot. Cells that
+       are not displayed still run, so the physics is unaffected by the
+       choice. -->
+  <script id="3" type="text/x-typescript">
+    const controlsView = display(controlFields);
+  </script>
+  <script id="3b" type="text/x-typescript">
+    const parametersView = display(abcFields);
+  </script>
+  <script id="3c" type="text/x-typescript">
+    const playbackView = display(playback);
+  </script>
+  <script id="3d" type="text/x-typescript">
+    const legendView = display(legend);
+  </script>
+  <script id="3e" type="text/x-typescript">
+    const sceneView = display(scenePlot);
+  </script>
+  <script id="3f" type="text/x-typescript">
+    const convergenceView = display(residualPlot);
+  </script>
+  <script id="4" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="5" type="text/x-typescript">
+    import {
+      line, polarCurve, namedParameters, iteration, residual,
+      row, column, badge, controls as gridControls, toggleButton, SERIES, frames
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="6" type="text/x-typescript">
+    // The two lines cross at the origin, so the intersection is a point you can
+    // see. The gaps are cut where the trajectory passes, which is what turns a
+    // problem every method solves into one that separates them.
+    const SCENES = {
+      "two convex sets": () => [
+        line({name: "A", direction: [2, 1], extent: 0.5}),
+        line({name: "B", direction: [8, 1], extent: 0.13})
+      ],
+      "two non-convex sets": () => [
+        line({name: "A", direction: [2, 1], extent: 0.5, excluded: [[1 / 8, 1 / 4]]}),
+        line({name: "B", direction: [8, 1], extent: 0.13, excluded: [[1 / 32, 1 / 16]]})
+      ],
+      "three sets": () => [
+        line({name: "A", direction: [2, 1], extent: 0.5, excluded: [[1 / 8, 1 / 4]]}),
+        line({name: "B", direction: [8, 1], extent: 0.13, excluded: [[1 / 32, 1 / 16]]}),
+        CURVE
+      ]
+    }
+  </script>
+  <script id="6b" type="text/x-typescript">
+    // A closed curve, placed so that it passes through the origin where the two
+    // lines already cross — otherwise the three sets share no point and there
+    // is nothing for the iteration to find — and sized to fit inside the frame
+    // the two lines set, so that adding it does not change the field of view.
+    //
+    // Its distance from the origin is `centre * sqrt(2)`, and its radius at the
+    // angle pointing back at the origin is `scale * 1`, so those two being equal
+    // is what puts the origin on the curve.
+    const CURVE = (() => {
+      const centre = 0.19;
+      return polarCurve({
+        name: "C", petals: 4, amplitude: 0.25, samples: 2048,
+        centre: [centre, centre], scale: Math.hypot(centre, centre)
+      });
+    })()
+  </script>
+  <script id="7" type="text/x-typescript">
+    // The kit's categorical series, so set A here is the same blue as the
+    // first series anywhere else, and all three hold up on a dark page.
+    const SET_COLOURS = SERIES
+  </script>
+
+  <script id="8" type="text/x-typescript">
+    const controlFields = gridControls(
+      Inputs.form({
+        scene: Inputs.radio(Object.keys(SCENES), {
+          value: "two convex sets", label: "sets"
+        }),
+        method: Inputs.radio([...Object.keys(namedParameters()), "generalised"], {
+          value: "AP", label: "algorithm"
+        }),
+        gamma: Inputs.range([0.05, 1], {value: 0.875, step: 0.005, label: "relaxation γ"})
+      }),
+      {columns: 3, minWidth: 170, compact: true}
+    )
+  </script>
+  <script id="8b" type="text/x-typescript">
+    // The three numbers themselves. Every named algorithm is a point in this
+    // space, so choosing one moves the sliders rather than disabling them, and
+    // nudging any slider is how you get to somewhere that has no name.
+    //
+    // Rebuilt when the algorithm or γ changes, which is safe: neither can
+    // change while one of these is being dragged.
+    const abcFields = (() => {
+      const named = namedParameters(settings.gamma);
+      const [a, b, c] = named[settings.method] ?? named.DM;
+      return gridControls(
+        Inputs.form({
+          a: Inputs.range([-2, 2], {value: a, step: 0.005, label: "a"}),
+          b: Inputs.range([0, 2], {value: b, step: 0.005, label: "b"}),
+          c: Inputs.range([0, 2], {value: c, step: 0.005, label: "c"})
+        }),
+        {columns: 3, minWidth: 150, compact: true}
+      );
+    })()
+  </script>
+  <script id="8c" type="text/x-typescript">
+    const abc = Generators.input(abcFields)
+  </script>
+  <script id="9" type="text/x-typescript">
+    const settings = Generators.input(controlFields)
+  </script>
+  <script id="10" type="text/x-typescript">
+    const runButton = toggleButton({on: "■ pause", off: "▶ run", value: false})
+  </script>
+  <script id="11" type="text/x-typescript">
+    const running = Generators.input(runButton)
+  </script>
+  <script id="12" type="text/x-typescript">
+    const resetButton = (() => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "em-toggle";
+      button.textContent = "↺ reset";
+      return button;
+    })()
+  </script>
+  <script id="13" type="text/x-typescript">
+    const resets = Generators.observe((notify) => {
+      let count = 0;
+      const onClick = () => notify(++count);
+      resetButton.addEventListener("click", onClick);
+      notify(0);
+      return () => resetButton.removeEventListener("click", onClick);
+    })
+  </script>
+
+  <script id="14" type="text/x-typescript">
+    const sets = SCENES[settings.scene]()
+  </script>
+  <script id="15" type="text/x-typescript">
+    const parameters = [abc.a, abc.b, abc.c]
+  </script>
+  <script id="16" type="text/x-typescript">
+    // The right-hand end of the two lines, midway between them.
+    //
+    // Clear of both sets and of both gaps. Starting inside a gap, as an earlier
+    // version did, begins the run already in the trap and hides the thing the
+    // non-convex case is meant to show — that the iteration walks in from
+    // outside and only then gets caught.
+    const START = (() => {
+      const edge = 1.0;
+      const yAt = ([dx, dy]) => (edge * dy) / dx;
+      return [edge, (yAt([2, 1]) + yAt([8, 1])) / 2];
+    })()
+  </script>
+
+  <script id="17" type="text/x-typescript">
+    // The whole run, recomputed whenever anything about the problem changes.
+    //
+    // Iterating ahead of time rather than one step per frame: the animation then
+    // only reveals a trajectory that already exists, so pausing, scrubbing and
+    // the convergence plot all read from the same array, and changing the
+    // algorithm cannot leave the picture half-way through the old one.
+    const trajectory = (() => {
+      resets;
+      // Any change to the problem starts the animation over.
+      playhead.at = 0;
+      const {start, step} = iteration(sets, parameters);
+      let state = start(START);
+      const points = [state.point];
+      const residuals = [residual(state.point, sets)];
+      // Each step's own working: one ray per set, from whatever that set was
+      // asked to project to where it sent it. With two sets those chain into
+      // the zig-zag everyone draws by hand; with three the algorithm splits the
+      // iterate into a copy per set and averages them back, so the rays start
+      // from three different places and only the average is a single path.
+      const legs = [];
+      // Sixty. Everything these algorithms do differently from each other has
+      // happened by then: alternating projections is in its trap inside ten
+      // steps, and the rest are close enough to the crossing to be sitting on
+      // it as far as the picture is concerned.
+      for (let i = 0; i < 60; i++) {
+        const from = state.point;
+        state = step(state);
+        legs.push({from, to: state.point, rays: state.rays});
+        points.push(state.point);
+        residuals.push(residual(state.point, sets));
+      }
+      return {points, residuals, legs};
+    })()
+  </script>
+  <script id="17b" type="text/x-typescript">
+    // Where the animation has got to, kept outside the reactive graph.
+    //
+    // Pausing re-runs the cell below, because it reads `running`. Holding the
+    // position in a local variable therefore lost it on every pause, and the
+    // animation jumped back to the start.
+    const playhead = ({at: 0})
+  </script>
+  <script id="18" type="text/x-typescript">
+    // How much of the trajectory has been revealed. Advances while running and
+    // holds still while paused.
+    //
+    // `frames` keeps yielding while paused so that the cell stays live, so the
+    // step has to be conditional here. Advancing on every yield ran the whole
+    // animation through without the button ever being pressed.
+    const shown = (function* () {
+      // Two and a half iterations a second, evenly. Slow enough to follow each
+      // projection as it happens, which is the point of drawing them at all.
+      // Pacing the early steps differently from the late ones made the run hard
+      // to read as a rate, which is the thing the convergence plot is about.
+      const PER_SECOND = 2.5;
+      const FPS = 30;
+      let budget = 0;
+      for (const _ of frames({fps: FPS, playing: running})) {
+        if (running) {
+          budget += PER_SECOND / FPS;
+          while (budget >= 1) {
+            budget -= 1;
+            playhead.at = Math.min(trajectory.points.length - 1, playhead.at + 1);
+          }
+        }
+        yield playhead.at;
+      }
+    })()
+  </script>
+
+  <script id="19" type="text/x-typescript">
+    const panelWidth = Math.max(320, Math.min(760, width - 40))
+  </script>
+  <script id="19b" type="text/x-typescript">
+    const sceneHeight = Math.round(panelWidth * 0.5)
+  </script>
+  <script id="20" type="text/x-typescript">
+    // Framed around whatever the scene contains, then widened to the panel's
+    // own shape.
+    //
+    // The scale has to be equal on both axes: these are distances in a plane,
+    // so a mismatch draws two lines through the origin at visibly wrong slopes
+    // and the closed curve as an ellipse. Matching the panel's aspect ratio
+    // rather than forcing a square is what lets the diagram run full width.
+    const VIEW = (() => {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      const include = ([x, y]) => {
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      };
+      // Framed on the two lines alone, which every scene has, so that adding a
+      // third set does not move the camera. The curve is sized to fit inside
+      // this frame rather than the frame being widened to hold it.
+      for (const set of sets.slice(0, 2)) {
+        for (const stretch of set.path) for (const p of stretch) include(p);
+      }
+      include(START);
+      include([0, 0]);
+
+      const pad = 0.04 * Math.max(maxX - minX, maxY - minY);
+      minX -= pad; maxX += pad; minY -= pad; maxY += pad;
+
+      const aspect = panelWidth / sceneHeight;
+      const spanY = Math.max(maxY - minY, (maxX - minX) / aspect);
+      const spanX = spanY * aspect;
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      return {x: [cx - spanX / 2, cx + spanX / 2], y: [cy - spanY / 2, cy + spanY / 2]};
+    })()
+  </script>
+  <script id="21" type="text/x-typescript">
+    const scenePlot = (() => {
+      const setMarks = sets.flatMap((set, i) =>
+        set.path.map((stretch) =>
+          Plot.line(stretch.map(([x, y]) => ({x, y})), {
+            x: "x", y: "y", stroke: SET_COLOURS[i], strokeWidth: 3, strokeOpacity: 0.9,
+            strokeLinecap: "round"
+          })));
+
+      // A fading trail: the recent past is drawn strongly and everything older
+      // fades, so where the iteration is going is legible without losing where
+      // it has been.
+      const TRAIL = 10;
+      const from = Math.max(0, shown - TRAIL);
+      const trail = [];
+      for (let i = from; i < shown; i++) {
+        const leg = trajectory.legs[i];
+        trail.push({
+          x0: leg.from[0], y0: leg.from[1], x1: leg.to[0], y1: leg.to[1],
+          age: (shown - i) / TRAIL
+        });
+      }
+
+      // Each set's own projections, in that set's colour, and the path of the
+      // iterate itself in the page's ink. Which is which is the whole point
+      // with three sets: the coloured rays fan out to three different places
+      // and the dark line is the average that is actually carried forward.
+      const done = trajectory.legs.slice(0, shown);
+
+      // Only the last few steps' projections. Kept for the whole run they
+      // accumulate into three hundred overlapping rays and the structure they
+      // were drawn to show disappears into the mess. The iterate's own path
+      // below keeps the full history.
+      const RAY_TRAIL = 8;
+      const recent = done.slice(-RAY_TRAIL);
+      const rays = recent.flatMap((leg, k) =>
+        leg.rays.flatMap((ray, i) => {
+          const age = (recent.length - k) / RAY_TRAIL;
+          return [
+            {x: ray.from[0], y: ray.from[1], key: `${k}-${i}`, set: i, age},
+            {x: ray.to[0], y: ray.to[1], key: `${k}-${i}`, set: i, age}
+          ];
+        }));
+      const travelled = [
+        ...done.map((leg, k) => ({x: leg.from[0], y: leg.from[1], k})),
+        ...(done.length ? [{x: done.at(-1).to[0], y: done.at(-1).to[1], k: done.length}] : [])
+      ];
+
+      const head = trajectory.points[shown];
+      return Plot.plot({
+        width: panelWidth, height: sceneHeight, marginLeft: 6, marginRight: 6,
+        marginTop: 6, marginBottom: 6,
+        x: {domain: VIEW.x, axis: null}, y: {domain: VIEW.y, axis: null},
+        marks: [
+          ...setMarks,
+          Plot.line(rays, {
+            x: "x", y: "y", z: "key", stroke: (d) => SET_COLOURS[d.set],
+            strokeOpacity: (d) => 0.75 * (1 - d.age), strokeWidth: 1.4
+          }),
+          Plot.line(travelled, {
+            x: "x", y: "y",
+            stroke: "currentColor", strokeOpacity: 0.45, strokeWidth: 1.2
+          }),
+          Plot.link(trail, {
+            x1: "x0", y1: "y0", x2: "x1", y2: "y1",
+            stroke: "currentColor", strokeOpacity: (d) => 0.85 * (1 - d.age),
+            strokeWidth: 1.8
+          }),
+          // Where the point currently is, and where it is trying to get to.
+          Plot.dot([{x: 0, y: 0}], {x: "x", y: "y", r: 4, symbol: "times",
+            stroke: "currentColor", strokeOpacity: 0.5}),
+          Plot.dot([{x: head[0], y: head[1]}], {
+            x: "x", y: "y", r: 4.5, fill: "currentColor"
+          })
+        ]
+      });
+    })()
+  </script>
+
+  <script id="22" type="text/x-typescript">
+    const residualPlot = (() => {
+      // A log axis, because the interesting range spans everything from a
+      // method that stalls at 0.1 to one that reaches 1e-50. On a linear axis
+      // they are the same flat line at the bottom.
+      //
+      // The floor comes from the whole run rather than from the part revealed
+      // so far, so the axis is fixed while the animation plays and only moves
+      // when the problem does.
+      // Both ends fixed, and the same for every algorithm and every scene.
+      // Deriving them from the data rescaled the axis whenever the method
+      // changed, which is exactly when two curves want comparing by eye.
+      //
+      // The floor is where the picture stops changing: below a thousandth the
+      // iterate sits on the crossing as far as the eye is concerned, so decades
+      // beneath are decades of nothing. The ceiling is just above the widest
+      // any named algorithm gets from this starting point, which is 0.82 — at
+      // the 2 it used to be, a third of the plot was empty.
+      const floor = 1e-3;
+      const ceiling = 1;
+      const data = trajectory.residuals.slice(0, shown + 1)
+        .map((r, i) => ({i, r: Math.min(Math.max(r, floor), ceiling)}));
+      return Plot.plot({
+        width: panelWidth, height: 170,
+        marginLeft: 58, marginRight: 10, marginTop: 10, marginBottom: 34,
+        x: {domain: [0, trajectory.points.length - 1], label: "iteration"},
+        // Anchored along the axis rather than above it, where Plot's default
+        // put it on top of the highest tick. Powers of ten rather than Plot's
+        // SI prefixes: "100m" for a distance in the same arbitrary units as the
+        // picture beside it reads as millimetres, which it is not.
+        y: {type: "log", domain: [floor, ceiling], label: "distance to the sets",
+            labelAnchor: "center", ticks: 5,
+            tickFormat: (d) => (d === 1 ? "1" : d.toExponential(0).replace("e", "e"))},
+        marks: [
+          Plot.ruleY([floor], {strokeOpacity: 0.2}),
+          // The page's own ink, not a series colour: this is the iterate's
+          // distance, and the iterate's path in the panel above is drawn the
+          // same way. A set colour here would read as belonging to that set.
+          Plot.line(data, {x: "i", y: "r", stroke: "currentColor", strokeWidth: 1.6}),
+          Plot.dot(data.slice(-1), {x: "i", y: "r", r: 3.5, fill: "currentColor"})
+        ]
+      });
+    })()
+  </script>
+
+  <script id="24" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="25" type="text/x-typescript">
+    const legend = (() => {
+      const node = htl.html`<div style="font-size:11px; display:flex; gap:16px;
+        flex-wrap:wrap; color:var(--theme-foreground-muted, inherit);
+        margin: 2px 0 6px;"></div>`;
+      node.replaceChildren(
+        ...sets.map((set, i) =>
+          htl.html`<span><b style="color:${SET_COLOURS[i]}">——</b> set ${set.name}</span>`),
+        htl.html`<span><b>——</b> the iterate</span>`
+      );
+      return node;
+    })()
+  </script>
+  <script id="26" type="text/x-typescript">
+    const playback = (() => {
+      const buttons = row([runButton, resetButton], {gap: 8});
+      buttons.style.justifyContent = "flex-start";
+      return buttons;
+    })()
+  </script>
+
+  <script id="27" type="text/x-typescript">
+    const draw = (() => {
+      const current = trajectory.residuals[shown];
+      const best = Math.min(...trajectory.residuals.slice(0, shown + 1));
+      // Named after the algorithm only while the numbers still are that
+      // algorithm. Nudge one and the row stops claiming to be AP, which it no
+      // longer is, without the radio moving under the reader.
+      const named = namedParameters(settings.gamma)[settings.method];
+      const isNamed = named && named.every((v, i) => Math.abs(v - parameters[i]) < 1e-9);
+      const parts = [
+        `${isNamed ? settings.method : "generalised"} ` +
+        `(a, b, c) = (${parameters.map((v) => v.toFixed(2)).join(", ")})`,
+        `iteration ${shown}`,
+        // The same threshold the convergence plot's axis stops at, so the
+        // readout and the curve agree: a curve on the floor is a run this row
+        // calls arrived.
+        current < 1e-3
+          ? "in the intersection"
+          : `distance to the sets ${current.toExponential(1)}`
+      ];
+      // Stalling is the thing worth naming, so it is named rather than left to
+      // be inferred from a flat line.
+      // Worth saying outright, since the a, b, c sliders make it easy to reach:
+      // a combination that pushes the iterate away instead of pulling it in.
+      if (current > 1) parts.push("diverging");
+
+      const window = trajectory.residuals.slice(Math.max(0, shown - 20), shown + 1);
+      if (shown > 25 && best > 1e-3 && Math.max(...window) - Math.min(...window) < best * 1e-3) {
+        parts.push("stalled: it cannot get any closer from here");
+      }
+      readout.textContent = parts.join(" · ");
+      return shown;
+    })()
+  </script>
+</notebook>

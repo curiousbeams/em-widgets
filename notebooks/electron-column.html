@@ -1,0 +1,549 @@
+<!doctype html>
+<notebook theme="air">
+  <title>The electron column</title>
+  <script id="1" type="text/markdown">
+    # One column, four ways to use it
+  </script>
+  <script id="2" type="text/markdown">
+    A scanning microscope and a transmission microscope are built from the same
+    parts. The **two-condenser** column is an SEM: two lenses to form the probe
+    and nothing after the specimen. The **three-condenser** column adds a third
+    condenser and a post-specimen objective, intermediate and projector, and is
+    a S/TEM.
+
+    That choice is the only one that changes the hardware. Everything below it
+    is a matter of setting focal lengths, which is what the **preset modes** do.
+    Move any lens away from its preset and the readout says *free lens mode* —
+    the preset still shows what you last chose, but the column is no longer set
+    up that way.
+
+    The beam is green because electron beams are always drawn green, a habit
+    left over from the phosphor viewing screens that microscopists spent years
+    looking at.
+
+    Two beams are drawn. The **green** one is the direct beam, which passes
+    through the specimen unscattered. The **blue** one is a diffracted beam: the
+    same illumination, sent on at the scattering angle by the specimen. Blue is
+    just a second colour, both are electrons.
+
+    Below the specimen the two do two things in turn, and every mode of the
+    instrument is a choice between them.
+
+    They **separate** at the back focal plane, where each beam is focused to its
+    own spot. Position there means scattering angle, which is a diffraction
+    pattern. This is where the objective aperture sits, so making it small
+    blocks the diffracted beam entirely.
+
+    They **recombine** at the image plane, where each lands back on the other.
+    Position there means position on the specimen, which is an image.
+
+    The intermediate lens decides which of the two the projector relays onto the
+    detector. Switching between **TEM imaging** and **TEM diffraction** changes
+    that one focal length and nothing else.
+
+    In **BF STEM** the illumination is converged to a probe instead, so the two
+    beams are overlapping discs rather than separated spots. No image plane
+    reaches the detector at all — a STEM image is built by scanning the probe
+    and recording one number per position, which is why it counts as a
+    diffractive technique.
+
+    The sliders sit beside the lens they control. Dashed marks show each
+    crossover the bundles make on the way down.
+
+    *After [EPFL LSME TEM Ray Diagrams](https://www.epfl.ch/labs/lsme/tem-ray-diagrams/),
+    © 2025 Duncan T.L. Alexander, CC-BY 4.0.*
+  </script>
+  <script id="3" type="text/x-typescript">
+    const electronColumn = display(layout);
+  </script>
+  <script id="4" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="5" type="text/x-typescript">
+    import {
+      COLUMNS, buildColumn, columnDefaults,
+      traceRays, traceFrom, statesAt,
+      bundleAt, bundleRadiusAt, pairedSeparationAt, findCrossovers, findPlanes,
+      row, column, badge, controls as gridControls, BEAM, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="6" type="text/x-typescript">
+    // The higher-order choice: how many condensers the column has. It decides
+    // which components exist, so the sliders are rebuilt around it.
+    const INSTRUMENTS = new Map([
+      ["2 condenser (SEM)", "SEM"],
+      ["3 condenser (S/TEM)", "S/TEM"]
+    ])
+  </script>
+  <script id="6b" type="text/x-typescript">
+    const instrumentFields = gridControls(
+      Inputs.form({
+        kind: Inputs.radio([...INSTRUMENTS.keys()], {
+          value: "3 condenser (S/TEM)", label: "column"
+        })
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="7" type="text/x-typescript">
+    const instrument = Generators.input(instrumentFields)
+  </script>
+  <script id="7b" type="text/x-typescript">
+    const columnKey = INSTRUMENTS.get(instrument.kind)
+  </script>
+  <script id="8" type="text/x-typescript">
+    const columnSpec = COLUMNS[columnKey]
+  </script>
+  <script id="8b" type="text/x-typescript">
+    // Presets belong to the S/TEM column alone, since an SEM has one way of
+    // being set up. The radio is built for both and hidden for the SEM, so that
+    // `Generators.input` always has a real input to read: pointed at anything
+    // without a `.value` it never yields, and every cell downstream of it waits
+    // forever.
+    const presetNames = Object.keys(COLUMNS["S/TEM"].modes)
+  </script>
+  <script id="8d" type="text/x-typescript">
+    const presetFields = gridControls(
+      Inputs.form({
+        preset: Inputs.radio(presetNames, {value: "TEM imaging", label: "preset modes"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="8e" type="text/x-typescript">
+    const preset = Generators.input(presetFields)
+  </script>
+  <script id="8f" type="text/x-typescript">
+    // Which preset the sliders start from. The SEM has none, so its controls
+    // fall back to each element's own default.
+    const activePreset = columnKey === "SEM" ? null : preset.preset
+  </script>
+  <script id="9" type="text/x-typescript">
+    // Generated from the column table rather than written out, which is what
+    // lets one widget drive both columns: the SEM simply yields fewer sliders.
+    //
+    // Rebuilt when the column or the preset changes, which is safe because
+    // neither can change while a slider is being dragged. Moving a slider
+    // changes only `lensValues`, and nothing structural reads that.
+    const lensFields = (() => {
+      const defaults = columnDefaults(columnSpec, activePreset);
+      const inputs = {};
+      for (const control of lensControls) {
+        inputs[control.key] = Inputs.range(control.range, {
+          value: control.key === "scattering" ? control.value : defaults[control.key],
+          step: control.step,
+          label: control.label
+        });
+      }
+      // `rows` rather than `compact`: the label goes beside the slider instead
+      // of above it, halving each control's height. Two of these have to fit in
+      // the 150 mm between the C2 lens and its aperture.
+      return gridControls(Inputs.form(inputs), {columns: 1, minWidth: 0, rows: true});
+    })()
+  </script>
+  <script id="9b" type="text/x-typescript">
+    // The controls, in one list, each knowing the height it belongs at. The
+    // scattering angle is not a component of the column, but it belongs at the
+    // specimen, which is the one plane in the stack with no slider of its own.
+    const lensControls = (() => {
+      const out = columnSpec.elements
+        .filter((e) => e.key !== undefined)
+        .map((e) => ({...e, zOf: (values) => (typeof e.z === "function" ? e.z(values) : e.z)}));
+
+      if (columnKey !== "SEM") {
+        const sample = columnSpec.elements.find((e) => e.kind === "sample");
+        out.push({
+          key: "scattering",
+          label: "scattering (mrad)",
+          // Far larger than a real Bragg angle. At a few mrad the two beams are
+          // a hairline apart everywhere except at a diffraction plane, and the
+          // diagram is about seeing them separate and recombine.
+          range: [30, 100], step: 1, value: 60,
+          zOf: () => sample.z
+        });
+      }
+      return out;
+    })()
+  </script>
+  <script id="10" type="text/x-typescript">
+    const lensValues = Generators.input(lensFields)
+  </script>
+
+  <script id="11" type="text/x-typescript">
+    const components = buildColumn(columnSpec, lensValues)
+  </script>
+  <script id="12" type="text/x-typescript">
+    const specimen = components.find((c) => c.type === "sample")
+  </script>
+  <script id="13" type="text/x-typescript">
+    // The illumination: a fan from the source, filling the column.
+    const illumination = traceRays(
+      components, 0, columnSpec.zEnd, columnSpec.semiangle, 192
+    )
+  </script>
+  <script id="14" type="text/x-typescript">
+    // The diffracted beam.
+    //
+    // The specimen does not emit a fresh cone of its own. It takes the beam that
+    // arrives and sends part of it on at a scattering angle, so the diffracted
+    // beam is the whole illumination again, tilted. Drawing it that way is what
+    // makes the diagram work in every mode: with parallel illumination the two
+    // beams focus to two separate spots in the back focal plane and recombine
+    // at the image plane, and with a converged probe they become two
+    // overlapping discs, which is the convergent-beam pattern a STEM detector
+    // actually sees.
+    //
+    // An earlier version launched a fan from a single point on the specimen.
+    // That does mark the image planes, but it says nothing about where the
+    // diffraction pattern comes from, and nothing at all in STEM.
+    const beams = (() => {
+      if (columnKey === "SEM") return {direct: [], diffracted: []};
+      const states = statesAt(illumination, specimen.axial_position);
+      const tilt = Math.tan((lensValues.scattering ?? 60) * 1e-3);
+      return {
+        // The same rays, continued two ways from the specimen. The direct one
+        // duplicates part of the illumination, but it has to be traced from
+        // here to stay index-aligned with the diffracted one: the pair is what
+        // locates the image planes, and pairing needs both halves to be the
+        // same rays in the same order.
+        direct: traceFrom(components, specimen.axial_position, columnSpec.zEnd, states),
+        diffracted: traceFrom(components, specimen.axial_position, columnSpec.zEnd,
+          states.map(([r, theta]) => [r, theta + tilt]))
+      };
+    })()
+  </script>
+  </script>
+  <script id="14b" type="text/x-typescript">
+    // What gets drawn. The direct beam is already on screen as the
+    // illumination, so only the diffracted half is taken from the pair.
+    const diffracted = beams.diffracted
+  </script>
+  <script id="15" type="text/x-typescript">
+    // Two kinds of plane, found two different ways.
+    //
+    // A diffraction plane is where the direct beam comes to a focus, so the
+    // measure is its own spread. An image plane is where the direct and
+    // diffracted beams land on top of each other again, so the measure is the
+    // distance between their centres — at the diffraction plane that distance
+    // is at its largest, which is the separation between the two spots.
+    const planes = (() => {
+      // From below the source, so that the point the illumination starts at is
+      // not itself reported as a crossover.
+      const crossovers = findCrossovers(illumination, {zStart: 0.1, zEnd: columnSpec.zEnd});
+      if (!diffracted.length) return {crossovers, images: []};
+
+      // Separation relative to how wide the beams are where it is measured.
+      // The raw separation is the wrong scale: at the detector in imaging mode
+      // the two centres are 90 um apart on a beam 140 mm across, which is an
+      // image by any standard, but as a fraction of the largest separation
+      // anywhere in the column it looked too big to count and the image on the
+      // detector went unmarked.
+      const separation = (z) => {
+        // Ray by ray, over the rays both beams still have. With none left there
+        // is nothing to recombine with, and `pairedSeparationAt` says so rather
+        // than reporting a coincidence at the axis.
+        const {separation: gap, spread, count} = pairedSeparationAt(
+          beams.direct, beams.diffracted, z
+        );
+        if (count === 0) return Infinity;
+        return gap / Math.max(spread, 1e-9);
+      };
+      const images = findPlanes(separation, {
+        // Started clear of the specimen, where the two beams have not had room
+        // to separate yet and every z looks like a coincidence.
+        zStart: specimen.axial_position + 0.08,
+        zEnd: columnSpec.zEnd,
+        tolerance: 0.05
+      });
+      return {crossovers, images};
+    })()
+  </script>
+  <script id="15b" type="text/x-typescript">
+    // Whether the lenses have been moved off the preset they came from.
+    //
+    // The radio keeps showing the preset the reader last chose, which is the
+    // right thing for it to show. The readout says when the column is no longer
+    // set up that way, so the radio is never left quietly claiming "TEM
+    // diffraction" for a column that has been turned back towards imaging.
+    const offPreset = (() => {
+      if (activePreset === null) return false;
+      const defaults = columnDefaults(columnSpec, activePreset);
+      return Object.entries(defaults).some(([key, value]) => lensValues[key] !== value);
+    })()
+  </script>
+  <script id="16" type="text/x-typescript">
+    const plotHeight = 720
+  </script>
+  <script id="17" type="text/x-typescript">
+    // More room below than above, so the detector's own name has somewhere to
+    // sit that is not on top of the plane label that lands there.
+    const zPad = {top: 0.05, bottom: 0.16}
+  </script>
+  <script id="18" type="text/x-typescript">
+    // Screen y for an axial position, shared by the plot and the slider column
+    // so a slider lines up with the lens it drives.
+    const zToY = (z) =>
+      ((z + zPad.top) / (columnSpec.zEnd + zPad.top + zPad.bottom)) * plotHeight
+  </script>
+  <script id="19" type="text/x-typescript">
+    // Capped well below the space available. The x domain is a half-metre of
+    // column radius against four metres of length, so letting the plot fill a
+    // wide page draws the lenses as saucers and the ray fans as lozenges. A
+    // narrow frame reads as a column.
+    const plotWidth = Math.max(260, Math.min(380, width - 330))
+  </script>
+
+  <script id="20" type="text/x-typescript">
+    const diagram = (() => {
+      const toLines = (bundle) =>
+        bundle.flatMap((trajectory, i) => trajectory.map(({z, r}) => ({z, r, ray: i})));
+
+      const lensMarks = components.filter((c) => c.type === "lens").flatMap((c) => [
+        Plot.line(
+          Array.from({length: 61}, (_, i) => {
+            const t = (i / 60) * 2 * Math.PI;
+            return {x: 0.18 * Math.cos(t), y: c.axial_position + 0.018 * Math.sin(t)};
+          }),
+          {x: "x", y: "y", strokeWidth: 1.5, stroke: "currentColor", strokeOpacity: 0.55}
+        )
+      ]);
+
+      // Apertures as a pair of blades, so the gap between them is the radius.
+      const apertureMarks = components.filter((c) => c.type === "aperture").flatMap((c) => [
+        Plot.rect([c], {
+          x1: () => -0.2, x2: (d) => -d.aperture_radius,
+          y1: (d) => d.axial_position - 0.006, y2: (d) => d.axial_position + 0.006,
+          fill: "currentColor", fillOpacity: 0.45
+        }),
+        Plot.rect([c], {
+          x1: (d) => d.aperture_radius, x2: () => 0.2,
+          y1: (d) => d.axial_position - 0.006, y2: (d) => d.axial_position + 0.006,
+          fill: "currentColor", fillOpacity: 0.45
+        })
+      ]);
+
+      // The specimen and the detector, each with its name beside it. Unlabelled,
+      // the specimen is just another grey bar in a column full of them, and it
+      // is the one plane the whole diagram is about.
+      const slab = (type, halfWidth, opacity) => {
+        const matching = components.filter((c) => c.type === type);
+        return [
+          Plot.rect(matching, {
+            x1: -halfWidth, x2: halfWidth,
+            y1: (d) => d.axial_position - 0.008, y2: (d) => d.axial_position + 0.008,
+            fill: "currentColor", fillOpacity: opacity
+          }),
+          // Below the bar, starting at its left edge. Hung off the left, the
+          // detector's name ran outside the x domain and Plot clipped it to
+          // "ctor"; above the bar, it collided with the plane label that lands
+          // on the detector.
+          Plot.text(matching, {
+            x: -halfWidth, y: (d) => d.axial_position, text: (d) => d.name,
+            textAnchor: "start", dy: 11, fontSize: 10,
+            fill: "currentColor", fillOpacity: 0.8
+          })
+        ];
+      };
+
+      const emissionMark = [];
+
+      // Crossovers, labelled on alternating sides so the two bundles' marks do
+      // not print over each other where they nearly coincide.
+      //
+      // Named for what they are rather than for which bundle made them. Above
+      // the specimen an image of the source is just a crossover; below it, it
+      // is the plane where scattering angle maps to position, which is the
+      // diffraction pattern. A crossover of the specimen bundle is an image.
+      const sample = specimen.axial_position;
+      const crossoverMarks = [
+        ...planes.crossovers.map((c) =>
+          [c, BEAM.stroke, c.z > sample ? "diffraction" : "crossover", 1]),
+        ...planes.images.map((c) => [c, UI.accent, "image", -1])
+      ].flatMap(([c, colour, label, side]) => [
+        Plot.ruleY([c.z], {
+          x1: side > 0 ? 0.02 : -0.2, x2: side > 0 ? 0.2 : -0.02,
+          stroke: colour, strokeWidth: 1, strokeDasharray: "2,3", strokeOpacity: 0.8
+        }),
+        Plot.text([{z: c.z, text: label}], {
+          x: side > 0 ? 0.2 : -0.2, y: "z", text: "text", dy: -5,
+          textAnchor: side > 0 ? "end" : "start",
+          fill: colour, fontSize: 10
+        })
+      ]);
+
+      return Plot.plot({
+        width: plotWidth, height: plotHeight,
+        marginLeft: 0, marginRight: 0, marginTop: 0, marginBottom: 0,
+        x: {domain: [-0.25, 0.25], axis: null},
+        y: {domain: [-zPad.top, columnSpec.zEnd + zPad.bottom], reverse: true, axis: null},
+        marks: [
+          Plot.line(toLines(illumination), {
+            x: "r", y: "z", z: "ray", stroke: BEAM.stroke, strokeWidth: 0.7, strokeOpacity: 0.4
+          }),
+          // Every fourth ray, and only for drawing. The two beams coincide
+          // everywhere except at a diffraction plane, so at the illumination's
+          // density this one simply painted over it and the whole column below
+          // the specimen turned blue.
+          //
+          // Thinning the bundle itself would have been wrong: taking every
+          // fourth ray of a symmetric fan leaves an asymmetric one, whose mean
+          // height is no longer the beam's centre, and the image planes are
+          // found by comparing the two beams' centres.
+          ...(diffracted.length ? [Plot.line(toLines(diffracted.filter((_, i) => i % 4 === 0)), {
+            x: "r", y: "z", z: "ray", stroke: UI.accent, strokeWidth: 0.6, strokeOpacity: 0.55
+          })] : []),
+          ...lensMarks,
+          ...apertureMarks,
+          ...slab("sample", 0.1, 0.8),
+          ...slab("detector", 0.22, 0.55),
+          ...emissionMark,
+          ...crossoverMarks
+        ]
+      });
+    })()
+  </script>
+
+  <script id="21" type="text/x-typescript">
+    const plotHost = htl.html`<div></div>`
+  </script>
+  <script id="22" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="23" type="text/x-typescript">
+    const BREAKPOINT = 560
+  </script>
+  <script id="24" type="text/x-typescript">
+    // The original notebook's best idea: when there is room, each slider is
+    // parked at the height of the component it drives, so the control panel is
+    // a labelled diagram of the column rather than a list. Below the breakpoint
+    // it falls back to a plain stack.
+    const layout = (() => {
+      const wide = width >= BREAKPOINT;
+      const sliders = [...lensFields.querySelectorAll(":scope > form")];
+      const keys = columnSpec.elements.filter((e) => e.key !== undefined);
+
+      if (wide) {
+        lensFields.style.position = "relative";
+        lensFields.style.display = "block";
+        // The control grid's default top margin would push every slider down
+        // relative to the plot beside it, which has none.
+        lensFields.style.margin = "0";
+        lensFields.style.width = "292px";
+        lensFields.style.height = `${plotHeight}px`;
+
+        // Each slider is parked at its own component's height and nowhere else.
+        // An earlier version pushed overlapping neighbours apart, which meant a
+        // slider no longer pointed at the lens it drives — and since the whole
+        // idea is that the panel is a labelled diagram of the column, that cost
+        // more than the crowding it fixed.
+        //
+        // The heights themselves are set by `positionSliders` below, not here.
+        // One of them depends on a slider value, and reading that here made the
+        // whole layout depend on it.
+        sliders.forEach((el) => {
+          el.style.position = "absolute";
+          el.style.width = "292px";
+          el.style.margin = "0";
+        });
+      }
+
+      // The mode radio sits above the whole thing rather than above the
+      // sliders. In the left-hand column it offset every slider below it by its
+      // own height, so the C1 control sat level with the second condenser.
+      // Hidden rather than omitted for the SEM, so the cell reading it always
+      // has a live input.
+      presetFields.style.display = columnKey === "SEM" ? "none" : "";
+
+      // The two radios share a line, with the presets to the right of the
+      // column they belong to. In the SEM the preset side is empty.
+      const modes = row([instrumentFields, presetFields], {gap: 28});
+      modes.style.justifyContent = "flex-start";
+      instrumentFields.style.margin = "0";
+      presetFields.style.margin = "0";
+
+      const body = row([lensFields, plotHost]);
+      const stack = column([modes, body], {align: "stretch"});
+      lensFields.style.flex = "0 0 auto";
+      plotHost.style.flex = "0 0 auto";
+      return stack;
+    })()
+  </script>
+  <script id="24b" type="text/x-typescript">
+    // Moves the sliders, and nothing else.
+    //
+    // This has to run on every input event, because the objective aperture sits
+    // at the back focal plane and so moves when the objective is refocused. It
+    // mutates `style.top` on elements that already exist rather than rebuilding
+    // anything — doing it inside `layout` made that cell depend on a live input
+    // value, so every keystroke of slider travel tore the whole widget down and
+    // rebuilt it, and the slider being dragged lost the pointer after one step.
+    const positionSliders = (() => {
+      if (width < BREAKPOINT) return null;
+      const sliders = [...lensFields.querySelectorAll(":scope > form")];
+      // Half the row's own height, so the slider is centred on its lens rather
+      // than hanging below it. A hardcoded offset was a pixel or two out, and
+      // `.em-controls` also carries a top margin that the plot beside it does
+      // not — together they put every control about ten pixels low.
+      sliders.forEach((el, i) => {
+        const middle = (el.offsetHeight || 26) / 2;
+        el.style.top = `${Math.max(0, zToY(lensControls[i].zOf(lensValues)) - middle)}px`;
+      });
+      return sliders.length;
+    })()
+  </script>
+
+  <script id="25" type="text/x-typescript">
+    const draw = (() => {
+      plotHost.replaceChildren(diagram);
+
+      const detector = components.find((c) => c.type === "detector");
+      const parts = [
+        offPreset ? "free lens mode" : `${components.filter((c) => c.type === "lens").length} lenses`
+      ];
+
+      // Is the source focused onto the specimen? That is what separates a
+      // scanned probe from flood illumination, and it is worth saying before
+      // anything about the detector, because a column set up this way is not
+      // trying to form an image at all.
+      const probeOnSpecimen = planes.crossovers.some(
+        (c) => Math.abs(c.z - specimen.axial_position) < 0.02
+      );
+      if (probeOnSpecimen && detector) {
+        parts.push("the source is focused to a probe on the specimen");
+      }
+
+      if (detector) {
+        // Which of the two planes the projector has landed on the detector,
+        // read off the marked planes rather than measured a second way, so the
+        // readout and the picture cannot disagree.
+        const near = (list) => list.some(
+          (p) => Math.abs(p.z - detector.axial_position) < 0.03
+        );
+        parts.push(
+          near(planes.images) ? "the two beams recombine on the detector, forming an image"
+            : near(planes.crossovers)
+              ? "the two beams land apart on the detector, as a diffraction pattern"
+            : probeOnSpecimen
+              ? "no image plane reaches the detector, because a STEM image is built by scanning"
+              : "the detector sees neither plane in focus"
+        );
+      } else {
+        parts.push("no post-specimen optics, so the probe lands on the specimen");
+        const probe = bundleRadiusAt(illumination, specimen.axial_position);
+        parts.push(`probe radius ${(probe * 1e3).toFixed(2)} mm at the specimen`);
+      }
+
+      if (diffracted.length && bundleAt(diffracted, columnSpec.zEnd).length === 0) {
+        parts.push("the objective aperture stops the diffracted beam, which is bright field");
+      }
+
+      const blocked = illumination.filter((t) => t.at(-1).z < columnSpec.zEnd - 1e-9).length;
+      parts.push(`${blocked} of ${illumination.length} rays stopped by an aperture`);
+
+      readout.textContent = parts.join(" · ");
+      return planes;
+    })()
+  </script>
+</notebook>

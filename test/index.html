@@ -41,8 +41,12 @@
         <option value="../notebooks/stem-experiment.html">stem-experiment (3D scene)</option>
         <option value="../notebooks/paraxial-rays.html">paraxial-rays</option>
         <option value="../notebooks/non-paraxial-rays.html">non-paraxial-rays (3D scene)</option>
+        <option value="../notebooks/electron-column.html">electron-column</option>
+        <option value="../notebooks/reciprocity.html">reciprocity</option>
+        <option value="../notebooks/projection-sets.html">projection-sets</option>
       </select>
       <label><input type="checkbox" id="dark" /> dark</label>
+      <span class="note" id="cells"></span>
       <button id="reload">reload</button>
     </header>
 
@@ -95,8 +99,13 @@
         // Served locally? Then run the notebooks against this checkout rather
         // than the published kit, so kit edits show up without a push.
         const local = ["localhost", "127.0.0.1"].includes(location.hostname);
+        // `cells` comes from the hash, so a modular notebook's embedding can be
+        // checked here: #nb=...&cells=controlsView,sceneView mounts only those,
+        // exactly as a page would.
+        const selected = new URLSearchParams(location.hash.slice(1)).get("cells");
         const model = makeModel({
           notebook: picker.value,
+          cells: selected ? selected.split(",").map((c) => c.trim()) : undefined,
           rewriteImports: local
             ? {"https://curiousbeams.github.io/em-widgets/": location.origin + "/"}
             : undefined
@@ -144,6 +153,10 @@
         applyDark();
         writeState();
       });
+
+      const cellsNote = document.getElementById("cells");
+      const selected = new URLSearchParams(location.hash.slice(1)).get("cells");
+      if (selected) cellsNote.textContent = `cells: ${selected}`;
 
       readState();
       mount();

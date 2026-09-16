@@ -1,0 +1,315 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Reciprocity</title>
+  <script id="1" type="text/markdown">
+    # The same instrument, read backwards
+  </script>
+  <script id="2" type="text/markdown">
+    A plane-wave TEM illuminates the whole specimen at once and forms an image
+    on a camera. A bright-field STEM focuses a probe onto one point and records
+    a single number, then moves the probe. They look like different
+    instruments.
+
+    They are the same optics read in opposite directions. Reciprocity says a ray
+    from a source to a detector follows the same path when the two are swapped,
+    so the TEM's objective aperture becomes the STEM's illumination aperture,
+    the TEM's camera becomes the STEM's source, and the specimen stays where it
+    is.
+
+    The **right-hand column is computed** from the left one by exchanging its
+    ends. Nothing about it is drawn by hand. Turn on **read the STEM column
+    upwards** and the two line up plane for plane.
+
+    Each colour is one direction through the specimen. In the TEM it is the
+    direction the illumination arrives from; in the STEM it is the direction a
+    ray leaves towards the detector. The **ties** connect the planes that map
+    onto each other.
+
+    *After `04.principle-of-reciprocity-nb.ipynb`, which builds the same figure
+    with temgymlite.*
+  </script>
+  <script id="3" type="text/x-typescript">
+    const reciprocity = display(layout);
+  </script>
+  <script id="4" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="5" type="text/x-typescript">
+    import {
+      reverseColumn, traceRays, traceParallel, bundleSpreadAt,
+      column, badge, controls as gridControls, BEAM
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <script id="6" type="text/x-typescript">
+    const SPAN = {zStart: 0, zEnd: 1.5}
+  </script>
+  <script id="7" type="text/x-typescript">
+    // The TEM column, from the source at the top to the camera at the bottom,
+    // following the temgymlite model the Python figure uses converted to this
+    // kit's convention that z grows downstream.
+    //
+    // The focal length is the one that closes the geometry rather than the
+    // 0.205 m the Python schematic carries. With the specimen 0.25 m before the
+    // objective and the camera 0.5 m after it, f = 1/6 images the specimen onto
+    // the camera — and reversing the column then focuses the source onto the
+    // specimen at exactly 0.75 m, which is what a bright-field STEM probe is.
+    // The two facts are the same fact, which is the point of the widget, so it
+    // is worth the geometry actually doing it.
+    const FOCAL = 1 / 6
+  </script>
+  <script id="8" type="text/x-typescript">
+    const temColumn = [
+      {type: "sample", name: "specimen", axial_position: 0.75},
+      {type: "lens", name: "objective lens", axial_position: 1.0, focal_length: FOCAL},
+      {type: "aperture", name: "objective aperture", axial_position: 1.0 + FOCAL,
+       aperture_radius: 0.0875}
+    ]
+  </script>
+  <script id="9" type="text/x-typescript">
+    // Not written out. Exchanging the ends of the TEM column is the whole
+    // claim, so the STEM column is that operation applied, and any change to
+    // the left-hand column shows up on the right by itself.
+    const stemColumn = reverseColumn(temColumn, SPAN)
+  </script>
+
+  <script id="10" type="text/x-typescript">
+    const controlFields = gridControls(
+      Inputs.form({
+        tilt: Inputs.range([0, 120], {value: 70, step: 5, label: "beam direction (mrad)"}),
+        reversed: Inputs.toggle({label: "read the STEM column upwards", value: false})
+      }),
+      {columns: 2, minWidth: 220, compact: true}
+    )
+  </script>
+  <script id="11" type="text/x-typescript">
+    const settings = Generators.input(controlFields)
+  </script>
+  <script id="12" type="text/x-typescript">
+    // One colour per direction through the specimen: straight through, and the
+    // two tilts either side of it.
+    const DIRECTIONS = [
+      {key: "left", sign: -1, colour: "#7b52d3"},
+      {key: "axial", sign: 0, colour: BEAM.stroke},
+      {key: "right", sign: 1, colour: "#e8833a"}
+    ]
+  </script>
+
+  <script id="13" type="text/x-typescript">
+    // The TEM: parallel illumination arriving at one angle, three angles drawn.
+    // The objective turns each into its own spot in the back focal plane, which
+    // is where the aperture sits.
+    const temBeams = DIRECTIONS.map((d) => ({
+      ...d,
+      rays: traceParallel(temColumn, SPAN.zStart, SPAN.zEnd, 0.09, 8, {
+        tilt: d.sign * settings.tilt * 1e-3
+      })
+    }))
+  </script>
+  <script id="14" type="text/x-typescript">
+    // The STEM: a point source at the top, an aperture limiting the cone, the
+    // objective converging it onto the specimen. The same three directions are
+    // the parts of that cone which reach the detector.
+    const stemBeams = (() => {
+      const half = settings.tilt * 1e-3;
+      return DIRECTIONS.map((d) => ({
+        ...d,
+        // A narrow fan centred on this direction, so each colour is a bundle in
+        // both panels rather than a bundle on one side and a line on the other.
+        rays: traceRays(stemColumn, SPAN.zStart, SPAN.zEnd, half / 3, 8, {
+          tilt: d.sign * half
+        })
+      }));
+    })()
+  </script>
+
+  <script id="15" type="text/x-typescript">
+    // Corresponding planes. Reversing the column maps each one onto its partner,
+    // and the specimen sits midway so it maps onto itself.
+    const correspondences = [
+      ...temColumn.map((c) => ({
+        name: c.name,
+        tem: c.axial_position,
+        stem: SPAN.zStart + SPAN.zEnd - c.axial_position
+      })),
+      {name: "source / camera", tem: SPAN.zStart, stem: SPAN.zEnd},
+      {name: "camera / source", tem: SPAN.zEnd, stem: SPAN.zStart}
+    ]
+  </script>
+
+  <script id="16" type="text/x-typescript">
+    const plotWidth = Math.max(420, Math.min(760, width - 40))
+  </script>
+  <script id="17" type="text/x-typescript">
+    const plotHeight = 460
+  </script>
+  <script id="18" type="text/x-typescript">
+    // Both columns share one plot so that the ties between them can be drawn in
+    // the same coordinates. Each panel gets half the x axis, with its own
+    // transverse scale inside that half.
+    const HALF = {tem: -0.5, stem: 0.5, reach: 0.38, rMax: 0.26}
+  </script>
+  <script id="19" type="text/x-typescript">
+    const toX = (panel, r) => HALF[panel] + (r / HALF.rMax) * HALF.reach
+  </script>
+  <script id="20" type="text/x-typescript">
+    // The STEM panel's vertical direction. Read upwards, its planes land level
+    // with the TEM planes they correspond to, which is the picture the whole
+    // widget is for.
+    const toY = (panel, z) =>
+      panel === "stem" && settings.reversed ? SPAN.zStart + SPAN.zEnd - z : z
+  </script>
+
+  <script id="21" type="text/x-typescript">
+    const diagram = (() => {
+      const beamMarks = [];
+      const push = (panel, beams, width) => {
+        for (const beam of beams) {
+          if (beam.sign !== 0 && settings.tilt === 0) continue;
+          const lines = beam.rays.flatMap((trajectory, i) =>
+            trajectory.map(({z, r}) => ({
+              x: toX(panel, r), y: toY(panel, z), ray: `${panel}-${beam.key}-${i}`
+            })));
+          beamMarks.push(Plot.line(lines, {
+            x: "x", y: "y", z: "ray",
+            stroke: beam.colour, strokeWidth: width, strokeOpacity: 0.55
+          }));
+        }
+      };
+      push("tem", temBeams, 0.9);
+      push("stem", stemBeams, 0.9);
+
+      // Components, drawn in each panel at its own orientation.
+      const componentMarks = [];
+      const addComponents = (panel, components) => {
+        for (const c of components) {
+          const y = toY(panel, c.axial_position);
+          if (c.type === "lens") {
+            componentMarks.push(Plot.line(
+              Array.from({length: 49}, (_, i) => {
+                const t = (i / 48) * 2 * Math.PI;
+                return {x: HALF[panel] + 0.3 * Math.cos(t), y: y + 0.03 * Math.sin(t)};
+              }),
+              {x: "x", y: "y", stroke: "currentColor", strokeOpacity: 0.5, strokeWidth: 1.4}
+            ));
+          } else if (c.type === "aperture") {
+            for (const side of [-1, 1]) {
+              componentMarks.push(Plot.rect([{}], {
+                x1: HALF[panel] + side * (c.aperture_radius / HALF.rMax) * HALF.reach,
+                x2: HALF[panel] + side * 0.34,
+                y1: y - 0.012, y2: y + 0.012,
+                fill: "currentColor", fillOpacity: 0.45
+              }));
+            }
+          } else if (c.type === "sample") {
+            componentMarks.push(Plot.rect([{}], {
+              x1: HALF[panel] - 0.3, x2: HALF[panel] + 0.3,
+              y1: y - 0.014, y2: y + 0.014,
+              fill: "currentColor", fillOpacity: 0.8
+            }));
+          }
+        }
+      };
+      addComponents("tem", temColumn);
+      addComponents("stem", stemColumn);
+
+      // Ties between the planes that map onto each other.
+      // Drawn right across both panels rather than only in the gap between
+      // them. Stopping at the edges left them floating in the middle with
+      // nothing to connect; run through, at low enough opacity to sit under the
+      // beams, they read as what they are.
+      // Only while the STEM column is reversed. Read the other way the ties
+      // cross in an X, which says nothing a reader can use — the planes line up
+      // only once the column has been turned round, and that is when showing
+      // which plane matches which is worth anything.
+      const tieMarks = settings.reversed
+        ? correspondences.map((c) =>
+            Plot.line([
+              {x: -0.97, y: toY("tem", c.tem)},
+              {x: 0.97, y: toY("stem", c.stem)}
+            ], {x: "x", y: "y", stroke: "currentColor", strokeOpacity: 0.18,
+                strokeWidth: 1, strokeDasharray: "2,5"}))
+        : [];
+
+      // End labels are hung off the outer edge of each panel, where no ray
+      // goes. Centred on the axis they sat inside the beam.
+      const label = (panel, z, text) => Plot.text(
+        [{x: HALF[panel] + (panel === "tem" ? -0.38 : 0.38), y: toY(panel, z), text}],
+        {x: "x", y: "y", text: "text", textAnchor: panel === "tem" ? "start" : "end",
+         fontSize: 10, fill: "currentColor", fillOpacity: 0.75}
+      );
+
+      return Plot.plot({
+        width: plotWidth, height: plotHeight,
+        marginLeft: 6, marginRight: 6, marginTop: 24, marginBottom: 24,
+        x: {domain: [-1, 1], axis: null},
+        y: {domain: [SPAN.zStart - 0.08, SPAN.zEnd + 0.08], reverse: true, axis: null},
+        marks: [
+          ...tieMarks,
+          ...beamMarks,
+          ...componentMarks,
+          Plot.text([
+            {x: HALF.tem, y: SPAN.zStart - 0.08, text: "plane-wave TEM"},
+            {x: HALF.stem, y: SPAN.zStart - 0.08, text: "bright-field STEM"}
+          ], {x: "x", y: "y", text: "text", dy: 2, fontSize: 12, fontWeight: 600,
+              fill: "currentColor"}),
+          label("tem", SPAN.zStart, "source"),
+          label("tem", SPAN.zEnd, "camera"),
+          // The text does not flip with the toggle, only where it is drawn.
+          // Flipping both cancelled out and left the STEM source labelled as
+          // the detector. Seeing "source" move to the bottom, level with the
+          // TEM's camera, is the whole point of the control.
+          label("stem", SPAN.zStart, "source"),
+          label("stem", SPAN.zEnd, "detector")
+        ]
+      });
+    })()
+  </script>
+
+  <script id="22" type="text/x-typescript">
+    const plotHost = htl.html`<div></div>`
+  </script>
+  <script id="23" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="24" type="text/x-typescript">
+    const layout = column([controlFields, plotHost], {align: "stretch"})
+  </script>
+  <script id="25" type="text/x-typescript">
+    const draw = (() => {
+      plotHost.replaceChildren(diagram);
+
+      // The two reciprocal facts, measured rather than asserted. If the
+      // geometry ever stops closing, the readout says so instead of the prose
+      // quietly becoming wrong.
+      const specimen = temColumn.find((c) => c.type === "sample").axial_position;
+
+      // Imaging the specimen means rays leaving one point on it arrive at one
+      // point on the camera, so the check has to launch from the specimen. The
+      // illumination bundle says nothing about it: parallel light through a
+      // specimen stays a wide beam at the camera however well focused the
+      // instrument is, which is what the first version of this measured.
+      const fromSpecimen = traceRays(temColumn, specimen, SPAN.zEnd, 0.05, 16, {height: 0.03});
+      const atCamera = bundleSpreadAt(fromSpecimen, SPAN.zEnd);
+
+      const probe = bundleSpreadAt(
+        stemBeams.find((b) => b.sign === 0).rays,
+        SPAN.zStart + SPAN.zEnd - specimen
+      );
+
+      const um = (v) => `${(v * 1e6).toFixed(0)} µm`;
+      const parts = [
+        `TEM: the specimen is imaged onto the camera, to within ${um(atCamera)}`,
+        `STEM: the source is focused onto the specimen, to within ${um(probe)}`
+      ];
+
+      const blocked = stemBeams.reduce((n, beam) =>
+        n + beam.rays.filter((t) => t.at(-1).z < SPAN.zEnd - 1e-9).length, 0);
+      if (blocked > 0) parts.push(`${blocked} rays stopped by the aperture`);
+
+      readout.textContent = parts.join(" · ");
+      return correspondences.length;
+    })()
+  </script>
+</notebook>

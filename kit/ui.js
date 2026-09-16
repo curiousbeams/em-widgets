@@ -34,6 +34,18 @@ export const UI = {
   deep: "#0f2a44"
 };
 
+/**
+ * Ordered categorical colours, for when a widget needs to tell several things
+ * apart.
+ *
+ * These are the colours already in use across the widgets — the accent blue,
+ * the orange that marks a specimen bundle, the beam green, a violet — collected
+ * so that the third series in one widget is the same hue as the third in
+ * another. All four carry enough contrast against both a white page and a dark
+ * one, which rules out yellows and pale greens however well they separate.
+ */
+export const SERIES = ["#04a1cd", "#e8833a", "#00b863", "#7b52d3"];
+
 // ---------------------------------------------------------------------------
 // Stylesheet
 // ---------------------------------------------------------------------------
@@ -112,9 +124,34 @@ const STYLES = `
   flex: 1 1 auto; min-width: 0; width: auto;
 }
 .em-controls--compact form[class^="inputs-"] input[type=number] {
-  flex: 0 0 auto; width: 54px;
+  /* Wide enough for a four-decimal value plus the spinner. At 54px a 0.875
+     came out as "0.8…". */
+  flex: 0 0 auto; width: 66px;
 }
 .em-controls--compact form[class^="inputs-"] select { width: 100%; }
+
+/* Rows: label beside its input, on one line, in a fixed-width column.
+   Compact stacks the label above the input, which doubles the height of every
+   control — fine in a panel, but not when each slider has to sit at the height
+   of the component it drives and two components are 150 mm apart. */
+.em-controls--rows form[class^="inputs-"] {
+  display: flex; align-items: center; gap: 6px; margin: 0;
+  font-size: 10px; line-height: 1.2; width: auto;
+}
+.em-controls--rows form[class^="inputs-"] > label {
+  display: block; flex: 0 0 112px; width: 112px; padding: 0; margin: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  color: var(--theme-foreground-muted, inherit);
+}
+.em-controls--rows form[class^="inputs-"] > div {
+  display: flex; gap: 5px; align-items: center; flex: 1 1 auto; min-width: 0;
+}
+.em-controls--rows form[class^="inputs-"] input[type=range] {
+  flex: 1 1 auto; min-width: 0; width: auto;
+}
+.em-controls--rows form[class^="inputs-"] input[type=number] {
+  flex: 0 0 auto; width: 58px; font-size: 10px; padding: 1px 3px;
+}
 
 /* Inline: label beside its input, for a single control sharing a line with
    buttons. Compact stacks the label above the input, which is right for a
@@ -322,10 +359,11 @@ export function panels(specs, {columns = 0, inset = false} = {}) {
  * @param {number} [options.columns=2] columns when there is room
  * @param {number} [options.minWidth=240] below this, use fewer columns
  */
-export function controls(form, {columns = 2, minWidth = 240, gap = 18, compact = false} = {}) {
+export function controls(form, {columns = 2, minWidth = 240, gap = 18, compact = false, rows = false} = {}) {
   ensureStyles(form);
   form.classList.add("em-controls");
   if (compact) form.classList.add("em-controls--compact");
+  if (rows) form.classList.add("em-controls--rows");
   // `minmax(0, ...)` at the floor when no minimum is asked for, so a control
   // grid inside a narrow column can shrink instead of overflowing it.
   const track = minWidth > 0

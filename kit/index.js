@@ -39,3 +39,4 @@ export * from "./specimen.js";
 export * from "./detectors.js";
 export * from "./paraxial.js";
 export * from "./nonparaxial.js";
+export * from "./projections.js";

@@ -18,12 +18,16 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Eight widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+Eleven widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
 `aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
 against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
-find its focal length, and `non-paraxial-rays`, which traces the coupled 3D ray
-equations to show Larmor rotation and spherical aberration.
+find its focal length, `non-paraxial-rays`, which traces the coupled 3D ray
+equations to show Larmor rotation and spherical aberration, `electron-column`,
+which drives an SEM or a S/TEM column from one table of components,
+`reciprocity`, which builds a bright-field STEM column by reversing a TEM one,
+and `projection-sets`, which shows why alternating projections is not enough for
+phase retrieval.
 
 ## Adding a widget to a page
 
@@ -65,8 +69,17 @@ several pages with different defaults, via `main.redefine(name, value)`.
    The consequence to be aware of: a notebook always runs against the
    **published** kit. Edit `kit/`, run `npm test`, push, then reload the notebook
    — local kit edits are not picked up by Desktop.
-3. Give the cell you want to embed a name — `const rayDiagram = view(...)` — so a
-   page can select it with `cells: ["rayDiagram"]`.
+3. Give the cell you want to embed a name — `const rayDiagram = display(...)` —
+   so a page can select it with `cells: ["rayDiagram"]`.
+
+   **Prefer one display cell per piece** rather than one that assembles
+   everything. A notebook that exposes `controlsView`, `sceneView`,
+   `convergenceView` and `readoutView` separately can be embedded whole, or as
+   just the diagram, or as the diagram with its main controls but without the
+   parameter sliders — the page decides. Cells that are not displayed still run,
+   so nothing about the computation depends on the choice. `projection-sets` is
+   the example to copy. The harness takes the same option:
+   `#nb=…&cells=controlsView,sceneView`.
 4. Check it in the harness: `npm run serve`, then open
    <http://localhost:8080/test/>. The harness mounts the widget in a real open
    shadow root, exactly as MyST does, so styling behaves identically.
@@ -82,6 +95,22 @@ several pages with different defaults, via `main.redefine(name, value)`.
 - Observable's `md` cells do not render `$...$`. Use `${tex`\chi`}` instead.
 - Imports and data URLs must be absolute (see above) — Desktop cannot see
   anything outside the notebook's own folder.
+- **A cell that builds or re-parents DOM must not depend on a live input
+  value.** Observable re-runs a cell whenever any input it reads changes, so if
+  the cell that assembles the layout also reads a slider, every pixel of slider
+  travel tears the widget down and rebuilds it. The slider being dragged is
+  removed from the document and reinserted, which drops the pointer capture, and
+  the symptom is that **sliders move one step per gesture and cannot be
+  dragged**. Build the structure in one cell and mutate it (`style.top`,
+  `replaceChildren`) from another that depends on the values. This has caused
+  the same bug twice, in `non-paraxial-rays` (a legend that read the cone
+  controls) and in `electron-column` (a slider parked at a back focal plane that
+  moves). `_build/pw/drag.mjs <notebook>` drags every slider across its range
+  and reports any that do not travel.
+- Controls that only change the camera or re-sample an existing result are
+  better kept out of the reactive graph entirely — a mutable state object plus a
+  listener that repaints. See the tilt and defocus sliders in
+  `non-paraxial-rays`.
 - **Do not name a cell `view`.** It is an Observable builtin, and a cell
   declaring it does not shadow the builtin for other cells. They keep seeing the
   standard library's function, so `view.tilt` reads `undefined` and the failure
@@ -110,10 +139,11 @@ duplicated across the lab's Python notebooks.
 | `image.js` | `histogramScaling`, `radialAverage`, `integrateGradient`, `gradient2d`, `warpNearest`, `poisson`, `cropCenter` |
 | `color.js` | `complexToRGB` (inverse CIECAM02), `phaseWheel`, `applyColormap` — magma, gray, twilight, RdBu, PuOr, PiYG, eclipse |
 | `scene3d.js` | `makeView`, `project`/`unproject`, `drawSpheres`, `drawPlane`, `drawProbeCone` — canvas 2D, no WebGL |
-| `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `UI` (the lab's palette) |
+| `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `UI` and `SERIES` (the lab's palettes) |
 | `anim.js` | `frames`, `whenVisible`, `qualityBudget` — generator cells the Observable scheduler drives |
 | `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `currentColor`, `pointerToIndices` |
-| `raytrace.js` | `transferMatrix`, `traceRays`, `semElectroOpticalComponents` |
+| `projections.js` | `generalisedProjection`, `productProjection`, `namedParameters` (AP/DM/RRR/RAAR), `line`, `polarCurve`, `iteration`, `residual` |
+| `raytrace.js` | `transferMatrix`, `traceRays`, `traceParallel`, `traceFrom`, `COLUMNS`/`buildColumn`, `reverseColumn`, `findCrossovers`/`findPlanes`, `pairedSeparationAt` |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |
 
 ### Conventions
