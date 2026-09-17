@@ -32,7 +32,8 @@
 
     Colour is the phase of ${tex`\Gamma`} and brightness its magnitude. With no
     aberrations the phase is constant inside each region, which is what makes
-    the simplest methods work. **Add defocus** and the phase starts winding, and
+    the simplest methods work. **Add defocus or spherical aberration** — the
+    slider above each panel — and the phase starts winding, and
     a method that does not know about it will fail.
   </script>
 
@@ -55,7 +56,7 @@
       softAperture, complexProbe, chi,
       complex, fftshiftComplex,
       overlapFunction, overlapFunctionAtQ, overlapRegions, checkOverlapGeometry,
-      complexToRGB, phaseWheel, blit, pointerToIndices,
+      complexToRGB, phaseWheel, blit, drawScalebar, pointerToIndices,
       controls as gridControls, badge, row, column, vectorPad, UI
     } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
   </script>
@@ -103,13 +104,42 @@
   </script>
 
   <script id="13" type="text/x-typescript">
-    // Defocus is rotationally symmetric, so it is a magnitude and nothing else.
+    // Defocus and spherical aberration are rotationally symmetric, so each is a
+    // magnitude and nothing else — a plain slider, sitting on top of the panel
+    // it acts on rather than in the column beside it.
     const defocusFields = gridControls(
       Inputs.form({
         defocus: Inputs.range([-30, 30], {value: 0, step: 0.5, label: "defocus (nm)"})
       }),
       {columns: 1, minWidth: 0, compact: true}
     )
+  </script>
+  <script id="13a" type="text/x-typescript">
+    // Twenty-five micrometres is about one turn of phase at the rim of the
+    // aperture: chi from C30 is 2 pi C30 alpha^4 / (4 lambda), which at 20 mrad
+    // and 300 kV reaches pi at 25 um. Negative is allowed because a corrector
+    // can produce it, and pairing it against defocus is the whole Scherzer
+    // argument.
+    const sphericalFields = gridControls(
+      Inputs.form({
+        cs: Inputs.range([-25, 25], {value: 0, step: 0.5, label: "Cs (µm)"})
+      }),
+      {columns: 1, minWidth: 0, compact: true}
+    )
+  </script>
+  <script id="13aa" type="text/x-typescript" pinned="">
+    // Sized so the two pads fill the column rather than sitting in the top of
+    // it: the figures beside them are a slider (about 54px), the panel, and a
+    // two-line caption (about 42px), and a pad costs its disc plus about 35px
+    // of label and readout.
+    //
+    // A constant rather than a function of `panelSize`, deliberately. Making it
+    // responsive would rebuild the pads on every resize, and a rebuilt pad comes
+    // back at zero — the reader would lose the aberration they had dialled in by
+    // dragging the window. The panels can be rebuilt because they hold no state,
+    // and the two sliders survive because they are moved, not remade. This is
+    // the size that fits the 668px prose column, which is the one that matters.
+    const padSize = 126
   </script>
   <script id="13b" type="text/x-typescript">
     // Astigmatism and coma each have a size and an axis, which is one quantity
@@ -119,23 +149,35 @@
     // Two-fold: astigmatism at an axis and at that axis turned by 180 degrees
     // are the same aberration, and the ghost handle says so.
     const astigmatismPad = vectorPad({
-      label: "astigmatism (nm)", max: 20, fold: 2, unit: " nm", size: 104
+      label: "astigmatism (nm)", max: 20, fold: 2, unit: " nm", size: padSize
     })
   </script>
   <script id="13c" type="text/x-typescript">
     // One-fold, so no ghost: coma points one way and reversing it is a
     // different aberration.
     const comaPad = vectorPad({
-      label: "coma (µm)", max: 4, fold: 1, unit: " µm", digits: 2, size: 104
+      label: "coma (µm)", max: 4, fold: 1, unit: " µm", digits: 2, size: padSize
     })
   </script>
   <script id="13d" type="text/x-typescript">
     // Stable element references only, so this never rebuilds under a drag.
-    const controlFields = column([defocusFields, astigmatismPad, comaPad], {align: "stretch"})
+    //
+    // Only the two pads now: the rotationally symmetric aberrations moved on top
+    // of the panels. `space-between` because the column is stretched to the
+    // height of the figures beside it — see the layout cell.
+    const controlFields = (() => {
+      const node = column([astigmatismPad, comaPad], {align: "stretch"});
+      node.style.justifyContent = "space-between";
+      node.style.height = "100%";
+      return node;
+    })()
   </script>
 
   <script id="14" type="text/x-typescript">
     const focus = Generators.input(defocusFields)
+  </script>
+  <script id="14a" type="text/x-typescript">
+    const spherical = Generators.input(sphericalFields)
   </script>
   <script id="14b" type="text/x-typescript">
     const astigmatism = Generators.input(astigmatismPad)
@@ -153,6 +195,7 @@
     // unchanged apart from degrees to radians.
     const aberrations = ({
       C10: -focus.defocus * 10,
+      C30: spherical.cs * 1e4,
       C12: astigmatism.magnitude * 10,
       phi12: (astigmatism.angle * Math.PI) / 180,
       C21: coma.magnitude * 1e4,
@@ -206,11 +249,21 @@
   <script id="22b" type="text/x-typescript">
     const panelSize = Math.max(190, Math.min(300, Math.floor((width - controlWidth - 46) / 2)))
   </script>
+  <script id="22c" type="text/x-typescript">
+    // One scalebar setting per panel, so both put their bar in the same corner.
+    // The two axes are different quantities — the detector plane is in
+    // scattering angle and the other in spatial frequency — which is half the
+    // point of showing them side by side, so each says its own units.
+    const detectorBar = ({extent: n * mradPerPixel, units: "mrad"})
+  </script>
+  <script id="22d" type="text/x-typescript">
+    const frequencyBar = ({extent: n * reciprocalSampling, units: "1/Å"})
+  </script>
 
   <script id="23" type="text/x-typescript">
     // A canvas with an SVG layer above it for the geometry, and a caption.
     // Built once per size change and never in response to a drag.
-    const makePanel = (name, label, hint) => {
+    const makePanel = (name, label, hint, control) => {
       const canvas = htl.html`<canvas style="
         width:${panelSize}px;height:${panelSize}px;display:block;
         border-radius:4px;cursor:crosshair;touch-action:none;">`;
@@ -228,7 +281,11 @@
           <rect x="0" y="0" width=${panelSize} height=${panelSize} rx="4"></rect>
         </clipPath></defs>
       </svg>`;
+      // The panel's own rotationally symmetric aberration sits above it, so
+      // the slider is beside the picture it changes rather than in a column of
+      // controls that could belong to either panel.
       const node = htl.html`<figure style="margin:0;width:${panelSize}px;">
+        ${control}
         <div style="position:relative;width:${panelSize}px;height:${panelSize}px;">
           ${canvas}${overlay}
         </div>
@@ -240,10 +297,14 @@
     }
   </script>
   <script id="24" type="text/x-typescript">
-    const detectorPanel = makePanel("detector", "over the detector, at fixed q", "drag to pick k")
+    const detectorPanel = makePanel(
+      "detector", "over the detector, at fixed q", "drag to pick k", defocusFields
+    )
   </script>
   <script id="25" type="text/x-typescript">
-    const frequencyPanel = makePanel("frequency", "over spatial frequency, at fixed k", "drag to pick q")
+    const frequencyPanel = makePanel(
+      "frequency", "over spatial frequency, at fixed k", "drag to pick q", sphericalFields
+    )
   </script>
   <script id="25b" type="text/x-typescript">
     const panelRow = row([detectorPanel.node, frequencyPanel.node], {gap: 16})
@@ -260,7 +321,11 @@
       right.style.flex = "0 0 auto";
       const node = row([left, right], {gap: 18});
       node.style.justifyContent = "flex-start";
-      node.style.alignItems = "flex-start";
+      // `stretch`, so the pads column is given the figures' own height and can
+      // spread its two pads over it. Aligning to the top instead left the
+      // controls ending well short of the panels, which read as an unfinished
+      // column rather than a deliberate one.
+      node.style.alignItems = "stretch";
       return node;
     })()
   </script>
@@ -378,9 +443,12 @@
       // the result has to be the thing that gets drawn. Ignoring it leaves the
       // image corner-centered under a centred overlay, and the overlap regions
       // appear in the corners.
-      const draw = (panel, field) => {
+      const draw = (panel, field, bar) => {
         const centred = fftshiftComplex(field, n, n);
-        blit(panel.canvas, complexToRGB(centred, {vmin: 0, vmax: 1}), n, n, {size: panelSize});
+        drawScalebar(
+          blit(panel.canvas, complexToRGB(centred, {vmin: 0, vmax: 1}), n, n, {size: panelSize}),
+          bar
+        );
       };
 
       const repaint = () => {
@@ -388,7 +456,7 @@
         const qIndex = flatIndex(picked.qRow, picked.qCol);
 
         // Left: the detector plane at the picked spatial frequency.
-        draw(detectorPanel, overlapFunctionAtQ(probe, n, qIndex, shifted));
+        draw(detectorPanel, overlapFunctionAtQ(probe, n, qIndex, shifted), detectorBar);
 
         const radius = (radiusPixels / n) * panelSize;
         const centre = toXY(0, 0);
@@ -428,7 +496,7 @@
         detectorPanel.overlay.replaceChildren(detectorPanel.defs, ...detectorMarks);
 
         // Right: spatial frequency at the picked detector pixel.
-        draw(frequencyPanel, overlapFunction(probe, n, n, kIndex, shifted));
+        draw(frequencyPanel, overlapFunction(probe, n, n, kIndex, shifted), frequencyBar);
         const limit = el("g", {"clip-path": `url(#${frequencyPanel.clipId})`});
         limit.appendChild(el("circle", {
           cx: centre.x, cy: centre.y, r: 2 * radius, fill: "none",

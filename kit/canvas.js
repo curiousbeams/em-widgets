@@ -297,30 +297,63 @@ export function niceScalebarLength(extent, fraction = 0.25) {
  * @param {string} [options.units="Å"]
  * @param {number} [options.length] bar length in physical units; defaults to a nice value
  * @param {string} [options.color="white"]
+ * @param {string|null} [options.halo="rgba(0,0,0,0.55)"] outline drawn under the
+ *   bar and its label, so a light bar stays readable on a light image. Pass
+ *   `null` for none.
+ * @param {[number, number]} [options.box] the image's size in the drawing
+ *   context's own units. Needed only for a context that has already been scaled,
+ *   as `ui.makeCanvas` returns; `blit` records its own ratio instead.
  */
-export function drawScalebar(ctx, {extent, units = "Å", length, color = "white", pad = 12}) {
+export function drawScalebar(
+  ctx,
+  {extent, units = "Å", length, color = "white", pad = 12, box, halo = "rgba(0,0,0,0.55)"}
+) {
   const canvas = ctx.canvas;
   const barUnits = length ?? niceScalebarLength(extent);
-  const pxPerUnit = canvas.width / extent;
+  // `box` is the image's size in the context's own units, for a context that has
+  // already been scaled — `ui.makeCanvas` returns one, having applied
+  // `ctx.scale(dpr, dpr)` so that a caller can draw in CSS pixels. Without it
+  // the arithmetic below would be in backing-store pixels and everything would
+  // come out twice too large on a retina screen. `blit` needs no `box`: it does
+  // not pre-scale its context, and records the ratio instead.
+  const [boxWidth, boxHeight] = box ?? [canvas.width, canvas.height];
+  const pxPerUnit = boxWidth / extent;
   const barPx = barUnits * pxPerUnit;
-  // Draw the bar and its label in display pixels, not array pixels — `blit`
-  // recorded the ratio when it sized the backing store.
-  const scale = canvasScale.get(canvas) ?? 1;
+  const scale = box ? 1 : (canvasScale.get(canvas) ?? 1);
 
   const height = Math.max(2, Math.round(3 * scale));
   const padPx = pad * scale;
-  const x = canvas.width - padPx - barPx;
-  const y = canvas.height - padPx - height;
+  const x = boxWidth - padPx - barPx;
+  const y = boxHeight - padPx - height;
 
   ctx.save();
-  ctx.fillStyle = color;
-  ctx.fillRect(x, y, barPx, height);
-
   const fontPx = Math.round(12 * scale);
   ctx.font = `${fontPx}px ui-sans-serif, system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "bottom";
-  ctx.fillText(`${formatLength(barUnits)} ${units}`, x + barPx / 2, y - 2 * scale);
+  const text = `${formatLength(barUnits)} ${units}`;
+  const textX = x + barPx / 2;
+  const textY = y - 2 * scale;
+
+  // A thin outline under the bar and the label, so a white scalebar survives a
+  // panel that is pale where it happens to sit — an empty signal image before
+  // the scan has filled it, or the middle of a diverging colormap. Without it
+  // every such panel needs its own hand-picked colour, and the one that is
+  // right on a dark image is wrong on a light one.
+  if (halo) {
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = halo;
+    ctx.lineWidth = Math.max(1, 1.2 * scale);
+    ctx.strokeRect(x - 0.5, y - 0.5, barPx + 1, height + 1);
+    // Thin: at three pixels on a twelve-pixel font the outline closes the
+    // counters and the label reads as one blob.
+    ctx.lineWidth = Math.max(1.5, 2 * scale);
+    ctx.strokeText(text, textX, textY);
+  }
+
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, barPx, height);
+  ctx.fillText(text, textX, textY);
   ctx.restore();
   return barUnits;
 }

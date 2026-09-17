@@ -304,8 +304,20 @@
   <script id="24" type="text/x-typescript">
     const layout = (() => {
       const left = column([kindFields, lensFields], {align: "stretch"});
-      left.style.flex = "0 0 auto";
-      left.style.width = "240px";
+      // The control column stretches when it ends up on a line of its own.
+      //
+      // `.em-row` wraps, and below about 1000px the figure no longer fits
+      // beside a 240px column — so the controls drop underneath it and, pinned
+      // at 240, sat as a narrow strip with the rest of the line empty beside
+      // them. A lens radio whose two options are 400px of text then wrapped as
+      // well. `flex: 1 1 240px` keeps them 240 wide or wider next to the
+      // figure, and gives them the whole line when they are on one, and the
+      // slider forms spread into however many columns that turns out to be.
+      left.style.flex = "1 1 240px";
+      left.style.minWidth = "240px";
+      for (const form of [lensFields]) {
+        form.style.gridTemplateColumns = "repeat(auto-fit, minmax(210px, 1fr))";
+      }
       const right = column([legend, plotHost], {align: "stretch"});
       right.style.flex = "0 0 auto";
       return row([left, right]);

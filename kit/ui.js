@@ -116,17 +116,24 @@ const STYLES = `
   display: block; width: auto; padding: 0; margin: 0 0 1px;
   color: var(--theme-foreground-muted, inherit);
 }
-/* Wrapping matters for radios. A slider's row is one range plus one number and
-   always fits, but a radio's row is one label per option and will happily run
-   past the end of a 240px control column and over whatever is beside it —
-   which for a canvas that handles its own pointer events means the options
-   underneath stop being clickable. */
+/* Wrapping matters for radios: a radio's row is one label per option and will
+   happily run past the end of a 240px control column and over whatever is
+   beside it — which for a canvas that handles its own pointer events means the
+   options underneath stop being clickable. */
 .em-controls--compact form[class^="inputs-"] > div {
   display: flex; gap: 5px; align-items: center; width: auto;
   flex-wrap: wrap; min-width: 0; max-width: 100%;
 }
+/* A slider's row is one number box and one range, and it has to stay on one
+   line. It does not do that by itself: flex wraps on the hypothetical size, and
+   a range input's own width is about 150px, so with the 66px number beside it
+   the row needs 220px before it will even consider shrinking. Below that — a
+   control column beside a figure, or a widget in a 668px prose column — the
+   number box ends up on one line and the slider on the next.
+   Giving the range a small flex-basis makes the row fit first and grow after,
+   which is the behaviour the number box already has. */
 .em-controls--compact form[class^="inputs-"] input[type=range] {
-  flex: 1 1 auto; min-width: 0; width: auto;
+  flex: 1 1 60px; min-width: 0; width: auto;
 }
 .em-controls--compact form[class^="inputs-"] input[type=number] {
   /* Wide enough for a four-decimal value plus the spinner. At 54px a 0.875
@@ -209,6 +216,11 @@ const STYLES = `
 .em-toggle {
   padding: 5px 13px; border-radius: 6px; cursor: pointer;
   font-size: 12px; font-weight: 600; font-family: inherit;
+  /* Never wrap and never shrink. In a flex row beside a progress bar a button
+     is shrinkable by default, and the first thing that gives is the space
+     between its glyph and its word — so a play button squeezed by a few pixels
+     comes apart into two lines and grows taller than the row it is in. */
+  white-space: nowrap; flex: 0 0 auto;
   background: transparent; color: inherit;
   border: 1px solid var(--theme-foreground-faintest, rgba(128,128,128,0.35));
   transition: background 120ms, border-color 120ms, color 120ms;

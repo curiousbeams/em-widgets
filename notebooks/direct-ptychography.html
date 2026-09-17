@@ -98,16 +98,18 @@
     // It does not change the signal-to-noise, though: the flip corrects the sign
     // of the transfer function without adding anything to it, so both variants
     // share a curve in the plot below.
-    // `label` is spelled out for the radio, which has the full width of the
-    // widget; `short` is for the readout and the plot legend, which do not.
+    // Acronyms, which is what these methods are called. Spelled out they are
+    // the full width of the widget at a desktop column and two lines in a 668px
+    // prose one, and five options that reflow are harder to compare than five
+    // that sit still. The prose above says what each stands for.
     const KERNELS = ({
-      ssb: {method: "ssb", label: "single sideband", short: "SSB"},
-      obf: {method: "obf", label: "optimum bright field", short: "OBF"},
+      ssb: {method: "ssb", label: "SSB", short: "SSB"},
+      obf: {method: "obf", label: "OBF", short: "OBF"},
       parallax: {method: "parallax", flip: false, label: "parallax", short: "parallax"},
       parallaxFlip: {
-        method: "parallax", flip: true, label: "phase-flipped parallax", short: "parallax (flipped)"
+        method: "parallax", flip: true, label: "phase-flipped prlx", short: "parallax (flipped)"
       },
-      icom: {method: "icom", label: "integrated centre of mass", short: "iCOM"}
+      icom: {method: "icom", label: "iCOM", short: "iCOM"}
     })
   </script>
   <script id="9" type="text/x-typescript" pinned="">
@@ -134,7 +136,7 @@
     })
   </script>
   <script id="10c" type="text/x-typescript">
-    const subsamplingInput = Inputs.select([4, 2, 1], {value: 4, label: "scan sub-sampling ×"})
+    const subsamplingInput = Inputs.select([4, 2, 1], {value: 4, label: "sub-sampling ×"})
   </script>
   <script id="10d" type="text/x-typescript">
     const doseInput = Inputs.select([1e2, 1e3, 1e4, 1e5, Infinity], {
@@ -391,7 +393,15 @@
     // so this is built once and never rebuilt under a gesture.
     const controlPanel = (() => {
       const node = gridControls(document.createElement("div"), {columns: 3, compact: true});
-      node.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      // Fixed widths for the last two columns and the slack to the first.
+      //
+      // Measured at a 668px prose column: the specimen radio wraps below 260px,
+      // and the bright-field meter with the play button beside it needs 217.
+      // The two dropdowns need only their own labels, about 92px, so they are
+      // the column to take it from — squeezed instead, the button row stayed
+      // inside the widget but the button itself came apart onto two lines.
+      node.style.gridTemplateColumns = "minmax(0, 1fr) 112px 240px";
+      node.style.columnGap = "12px";
       node.style.rowGap = "6px";
 
       const place = (child, row, column) => {
@@ -450,16 +460,16 @@
   <script id="41" type="text/x-typescript">
     const flow = flowDiagram(
       [
-        {key: "detector", label: "bright-field pixel k", width: panelSize, height: panelSize,
+        {key: "detector", label: "BF pixel k", width: panelSize, height: panelSize,
          row: 0, column: 0, cursor: "crosshair"},
-        {key: "virtual", label: "virtual BF image", width: panelSize, height: panelSize, row: 0, column: 1},
-        {key: "spectrum", label: "G(q)", width: panelSize, height: panelSize, row: 0, column: 2},
-        {key: "contribution", label: "this pixel's share", width: panelSize, height: panelSize, row: 0, column: 3},
+        {key: "virtual", label: "virtual BF", width: panelSize, height: panelSize, row: 0, column: 1},
+        {key: "spectrum", label: "spectrum, G(q)", width: panelSize, height: panelSize, row: 0, column: 2},
+        {key: "contribution", label: "filtered vBF", width: panelSize, height: panelSize, row: 0, column: 3},
         {key: "sum", label: "reconstructed phase", width: panelSize * 2, height: panelSize * 2,
          row: 0, column: 4, rowSpan: 2},
         // The space under the first three panels, which would otherwise be empty.
         {key: "ssnr", content: ssnrHost, row: 1, column: 0, colSpan: 3},
-        {key: "kernel", label: "H(q) — the kernel", width: panelSize, height: panelSize, row: 1, column: 3}
+        {key: "kernel", label: "kernel, H(q)", width: panelSize, height: panelSize, row: 1, column: 3}
       ],
       [
         {from: "detector", to: "virtual", label: "pick k"},

@@ -345,8 +345,24 @@
     // only move one step at a time.
     const layout = (() => {
       const left = column([traceFields, coneFields, viewFields], {align: "stretch"});
-      left.style.flex = "0 0 auto";
-      left.style.width = "240px";
+      // The control column stretches when it ends up on a line of its own.
+      //
+      // `.em-row` wraps, and below about 1000px the figure no longer fits
+      // beside a 240px column — so the controls drop underneath it and, pinned
+      // at 240, sat as a narrow strip with the rest of the line empty beside
+      // them. A lens radio whose two options are 400px of text then wrapped as
+      // well. `flex: 1 1 240px` keeps them 240 wide or wider next to the
+      // figure, and gives them the whole line when they are on one, and the
+      // slider forms spread into however many columns that turns out to be.
+      left.style.flex = "1 1 240px";
+      left.style.minWidth = "240px";
+      for (const form of [coneFields, viewFields]) {
+        form.style.gridTemplateColumns = "repeat(auto-fit, minmax(210px, 1fr))";
+      }
+      // The lens radio lives in `traceFields` and its two options are 400px of
+      // text, so that form only splits into columns when there is room for two
+      // of those — otherwise halving it puts the radio back on two lines.
+      traceFields.style.gridTemplateColumns = "repeat(auto-fit, minmax(420px, 1fr))";
       const right = column([legendHost, stage.node], {align: "stretch"});
       right.style.flex = "0 0 auto";
       return row([left, right]);

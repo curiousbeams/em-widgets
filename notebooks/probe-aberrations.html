@@ -9,7 +9,7 @@
     transform. Aberrations live entirely in that phase, so every slider changes
     the *colour* of the left panel and the *shape* of the right one.
 
-    Brightness is amplitude and hue is phase, as in the wheel beside each panel.
+    Brightness is amplitude and hue is phase, as in the wheel inset in the lower-left of each panel.
 
     *Port of `aberrations_widget` from the IUCr 4D-STEM workshop
     (`04.electron-wavefunction.ipynb`), which used abtem's `CTF`. The kit is
@@ -88,7 +88,15 @@
     )
   </script>
   <script id="12" type="text/x-typescript" pinned="">
-    const panelSize = Math.max(200, Math.min(300, Math.floor((width - 90) / 2)))
+    // Two panels side by side, with only the gap between them to pay for.
+    //
+    // The phase wheel used to sit beside each canvas, which made a panel
+    // `panelSize + 54` wide and meant the pair needed 124px more than the two
+    // images. In a 668px prose column that was just too much and the second
+    // panel dropped below the first — the figure reads as a comparison, so that
+    // is the wrong thing to lose first. The wheel is now inset in the panel and
+    // costs nothing.
+    const panelSize = Math.max(200, Math.min(300, Math.floor((width - 16) / 2)))
   </script>
   <script id="13" type="text/x-typescript" pinned="">
     // A domain-coloured panel with a phase wheel and a scalebar, mirroring
@@ -107,12 +115,26 @@
       );
       drawScalebar(ctx, {extent, units});
 
-      const wheel = htl.html`<canvas width="48" height="48"
-        style="width:48px;height:48px;flex:none;" title="hue = phase, brightness = amplitude">`;
-      wheel.getContext("2d").putImageData(new ImageData(phaseWheel(48), 48, 48), 0, 0);
+      // Inset in the lower-left corner, which is the one corner nothing else
+      // uses: the scalebar is drawn bottom-right, and both panels are dark at
+      // the edges and bright in the middle. Drawn at twice its display size so
+      // it is not soft on a retina screen, and rung in white because the
+      // wheel's own centre is black and would otherwise dissolve into the
+      // panel behind it.
+      const side = Math.max(34, Math.min(48, Math.round(panelSize * 0.16)));
+      const pixels = 2 * side;
+      const wheel = htl.html`<canvas width="${pixels}" height="${pixels}"
+        style="width:${side}px;height:${side}px;position:absolute;left:9px;bottom:9px;
+               border-radius:50%;box-shadow:0 0 0 1px rgba(255,255,255,0.35);
+               pointer-events:none;"
+        title="hue = phase, brightness = amplitude">`;
+      wheel.getContext("2d").putImageData(
+        new ImageData(phaseWheel(pixels), pixels, pixels), 0, 0);
 
       return htl.html`<figure style="margin:0;">
-        <div style="display:flex;gap:6px;align-items:center;">${canvas}${wheel}</div>
+        <div style="position:relative;width:${panelSize}px;height:${panelSize}px;">
+          ${canvas}${wheel}
+        </div>
         <figcaption style="font-size:12px;text-align:center;margin-top:4px;opacity:0.75;">${label}</figcaption>
       </figure>`;
     }

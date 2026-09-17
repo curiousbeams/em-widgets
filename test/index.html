@@ -14,7 +14,7 @@
         margin: 0;
         padding: 24px;
         font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
-        max-width: 900px;
+        max-width: 1400px;
         margin-inline: auto;
         background: var(--page-bg);
         color: var(--page-fg);
@@ -22,9 +22,17 @@
       header { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
       h1 { font-size: 18px; margin: 0; }
       select, button, input { font: inherit; padding: 4px 8px; }
+      input[type="range"] { padding: 0; width: 150px; vertical-align: middle; }
+      #widthOut { font-variant-numeric: tabular-nums; }
       /* Deliberately hostile page styles: anything that leaks into the widget
          through the shadow boundary will be obvious. */
-      #host { border: 1px dashed color-mix(in srgb, currentColor 30%, transparent); padding: 12px; border-radius: 6px; }
+      /* `box-sizing` is content-box here, so this width is exactly what the
+         widget's own `width` builtin reports — the same number the deployed
+         theme gives it. */
+      #host {
+        border: 1px dashed color-mix(in srgb, currentColor 30%, transparent);
+        padding: 12px; border-radius: 6px; width: 668px; margin-inline: auto;
+      }
       .note { opacity: 0.7; font-size: 13px; }
       code { font-family: ui-monospace, Menlo, monospace; }
     </style>
@@ -49,6 +57,15 @@
         <option value="../notebooks/projection-sets.html">projection-sets</option>
       </select>
       <label><input type="checkbox" id="dark" /> dark</label>
+      <label title="the column the widget gets; 668px is the deployed Curvenote prose column">
+        width
+        <input type="range" id="width" list="widths" min="320" max="1280" step="1" value="668" />
+        <datalist id="widths">
+          <option value="527"></option>
+          <option value="668"></option>
+        </datalist>
+        <span id="widthOut">668</span>&thinsp;px
+      </label>
       <span class="note" id="cells"></span>
       <button id="reload">reload</button>
     </header>
@@ -58,7 +75,11 @@
       <code>/test/</code>) — <code>file://</code> will not work, because the
       widget fetches the notebook and imports ES modules.
       The widget is mounted in a real open shadow root, exactly as MyST's theme
-      mounts it, so styling behaves the same here as on the site. On localhost
+      mounts it, so styling behaves the same here as on the site.
+      <strong>width</strong> sets the column the widget is given: the deployed
+      Curvenote prose column is 668&thinsp;px at a desktop viewport and 527&thinsp;px
+      at 1024&thinsp;px, which are the two marks on the slider. Widgets embedded
+      inside a <code>col-page</code> block get about 1100&thinsp;px. On localhost
       the published kit URL is rewritten to this checkout, so edits to
       <code>kit/</code> take effect on reload.
     </p>
@@ -71,6 +92,12 @@
       const host = document.getElementById("host");
       const picker = document.getElementById("notebook");
       const darkToggle = document.getElementById("dark");
+      const widthInput = document.getElementById("width");
+      const widthOut = document.getElementById("widthOut");
+      function applyWidth() {
+        host.style.width = `${widthInput.value}px`;
+        widthOut.textContent = widthInput.value;
+      }
       let cleanup;
 
       // The minimal MyST model shim: get / set / on, and nothing else.
@@ -129,13 +156,21 @@
       function readState() {
         const params = new URLSearchParams(location.hash.slice(1));
         if (params.has("nb")) picker.value = params.get("nb");
+        if (params.has("w")) widthInput.value = params.get("w");
         darkToggle.checked = params.get("dark") === "1";
         applyDark();
+        applyWidth();
       }
       function writeState() {
+        // Read before overwriting: `cells` is set by hand in the URL and has no
+        // control of its own, so it would otherwise be lost the first time the
+        // notebook or the theme changed.
+        const cells = new URLSearchParams(location.hash.slice(1)).get("cells");
         const params = new URLSearchParams();
         params.set("nb", picker.value);
+        if (cells) params.set("cells", cells);
         if (darkToggle.checked) params.set("dark", "1");
+        if (widthInput.value !== "668") params.set("w", widthInput.value);
         location.hash = params.toString();
       }
       function applyDark() {
@@ -156,6 +191,12 @@
         applyDark();
         writeState();
       });
+      // Neither does the width: the wrapper backs the notebook's `width` builtin
+      // with a ResizeObserver on this container, so cells that depend on it
+      // re-run as the slider moves. That is the point — a layout that only
+      // breaks at one width is worth finding by dragging.
+      widthInput.addEventListener("input", applyWidth);
+      widthInput.addEventListener("change", writeState);
 
       const cellsNote = document.getElementById("cells");
       const selected = new URLSearchParams(location.hash.slice(1)).get("cells");

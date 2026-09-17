@@ -40,11 +40,11 @@
     changing the answer by asking. The arrow back into the specimen reads
     **held** while it is on.
 
-    With **probe: known** the probe is held exactly as it was set and only the
+With **probe: fixed** the probe is held exactly as it was set and only the
     specimen is solved for. The exit wave still changes from step to step,
     because it is the probe times the object and the object is what is being
-    found. **Unknown** starts from a probe with the wrong defocus and refines it
-    alongside the specimen, by the same expression with the two swapped — the
+    found. **Refined** starts from a probe with the wrong defocus and solves for
+    it alongside the specimen, by the same expression with the two swapped — the
     extension the e in ePIE stands for, and what a real experiment has to do.
 
     The specimen is solved for as a **potential** rather than as a general complex
@@ -211,10 +211,7 @@
     // from a probe with the wrong defocus and refines it alongside the object,
     // by the same expression with the two swapped — which is the extension the
     // e in ePIE stands for, and what a real experiment has to do.
-    const probeInput = Inputs.radio(["known", "unknown"], {
-      value: "known", label: "probe",
-      format: (k) => (k === "known" ? "known" : "unknown, refined")
-    })
+    const probeInput = Inputs.radio(["fixed", "refined"], {value: "fixed", label: "probe"})
   </script>
   <script id="16" type="text/x-typescript">
     // Stable hosts for the two controls whose values follow the specimen.
@@ -256,7 +253,7 @@
     const dose = settled(doseInput)
   </script>
   <script id="20" type="text/x-typescript">
-    const probeKnown = settled(probeInput) === "known"
+    const probeKnown = settled(probeInput) === "fixed"
   </script>
 
   <script id="21" type="text/x-typescript">
@@ -515,7 +512,22 @@
     // under a gesture.
     const controlPanel = (() => {
       const node = gridControls(document.createElement("div"), {columns: 3, compact: true});
-      node.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      // Not three equal thirds: at a 668px prose column a third is 211px, which
+      // is too narrow for a three-option specimen radio on one line and for
+      // three buttons in a row. The middle column holds two dropdowns and a
+      // two-option radio and wants the least, so it gives the slack to the
+      // other two. The gap is tightened for the same reason.
+      // Fixed widths for the last two columns and the slack to the first.
+      //
+      // Measured rather than guessed, by shrinking each until it broke: the
+      // specimen radio wraps below 260px, the probe radio below 160, and the
+      // three buttons need 226 with a four-pixel gap between them. That is 646
+      // of the 656 a 668px prose column has once the gaps are paid for — it
+      // fits, but only just, and a column a pixel short wraps. Fractions cannot
+      // divide it reliably; the last two columns hold fixed-size contents, so
+      // they are given exactly what they need and the radio takes the rest.
+      node.style.gridTemplateColumns = "minmax(0, 1fr) 160px 226px";
+      node.style.columnGap = "6px";
       node.style.rowGap = "6px";
 
       const place = (child, gridRow, gridColumn) => {
@@ -550,7 +562,7 @@
 
       place(betaInput, 3, "1");
       place(probeInput, 3, "2");
-      const buttons = row([playButton, resetButton, inspectButton], {gap: 6});
+      const buttons = row([playButton, resetButton, inspectButton], {gap: 4});
       buttons.style.alignItems = "center";
       beside(buttons, 3);
       return node;

@@ -11,7 +11,9 @@
 
     Press **▶ scan** to raster the probe across the field, filling the four
     signal panels as it goes. Or **hover** over the scene to drive the probe
-    yourself, filling in whatever pixel it lands on, and **click** to pin it.
+    yourself — the exit wave and the diffraction pattern follow it, and the
+    marker shows which pixel of the signal images it is standing on — and
+    **click** to pin it there while you change the optics.
 
     Nothing here is precomputed. The atoms, their projected potential, the exit
     wave, the diffraction pattern and every detector signal are computed in your
@@ -37,7 +39,7 @@
       centreOfMassFromSegments,
       makeView, project, unproject, drawPlaneBanded, drawProbeCone, drawSpheres, ring,
       scene, panels, row, column, controls as gridControls, toggleButton, badge,
-      collapsible, makeCanvas, transposeToImageData,
+      makeCanvas, transposeToImageData, drawScalebar,
       frames, whenVisible, qualityBudget
     } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
   </script>
@@ -81,7 +83,13 @@
       Inputs.form({
         diameter: Inputs.range([10, 28], {value: 24, step: 1, label: "particle size (Å)"}),
         support: Inputs.range([2, 14], {value: 8, step: 1, label: "carbon film (Å)"}),
-        twist: Inputs.range([0, 90], {value: 10, step: 1, label: "orientation (°)"})
+        twist: Inputs.range([0, 90], {value: 10, step: 1, label: "orientation (°)"}),
+        // Grouped by what a reader changes together rather than by what is cheap
+        // to recompute: this one sits in the specimen's form, so moving it
+        // rebuilds the atoms. That costs a fraction of a second on a control
+        // with three settings, which already restarts the scan whichever form
+        // it lives in.
+        step: Inputs.range([0.25, 0.75], {value: 0.5, step: 0.25, label: "scan step (Å)"})
       }),
       {columns: 1, minWidth: 0, compact: true}
     )
@@ -90,7 +98,10 @@
     const specimenControls = Generators.input(specimenFields)
   </script>
   <script id="11" type="text/x-typescript">
-    const specimenForm = collapsible("specimen", specimenFields, true)
+    // No longer a collapsible section. Ten controls in one two-column block
+    // read as one panel of settings; three labelled drawers over the same ten
+    // spent a third of the column on their own headings.
+    const specimenForm = specimenFields
   </script>
   <script id="12" type="text/x-typescript">
     const opticsFields = gridControls(
@@ -98,7 +109,8 @@
         defocus: Inputs.range([-15, 15], {value: 0, step: 2.5, label: "defocus (Å)"}),
         semiangle: Inputs.range([8, 30], {value: 20, step: 1, label: "semi-angle α (mrad)"}),
         dose: Inputs.select(["∞", "1000000", "100000", "10000", "1000", "100"],
-                            {value: "1000000", label: "dose (e⁻/pattern)"})
+                            {value: "1000000", label: "dose (e⁻/pattern)"}),
+        adfOuter: Inputs.range([1.2, 3], {value: 2.8, step: 0.1, label: "ADF outer (α)"})
       }),
       {columns: 1, minWidth: 0, compact: true}
     )
@@ -107,7 +119,7 @@
     const optics = Generators.input(opticsFields)
   </script>
   <script id="14" type="text/x-typescript">
-    const opticsForm = collapsible("optics", opticsFields, true)
+    const opticsForm = opticsFields
   </script>
   <script id="15" type="text/x-typescript">
     // Detector and scan in one form, because they share a column and because a
@@ -124,14 +136,12 @@
     // to `ADF outer`. Three numbers, three regions, no overlap.
     const instrumentFields = gridControls(
       Inputs.form({
-        inner: Inputs.range([0, 1], {value: 0.5, step: 0.05, label: "segments from (α)"}),
-        outer: Inputs.range([0.6, 2], {value: 1.05, step: 0.05, label: "segments to (α)"}),
+        inner: Inputs.range([0, 1], {value: 0.5, step: 0.05, label: "inner radius (α)"}),
+        outer: Inputs.range([0.6, 2], {value: 1.05, step: 0.05, label: "outer radius (α)"}),
         sectors: Inputs.select([4, 8, 16], {value: 8, label: "sectors"}),
-        rotation: Inputs.range([0, 90], {value: 22.5, step: 2.5, label: "rotation (°)"}),
-        adfOuter: Inputs.range([1.2, 3], {value: 2.8, step: 0.1, label: "ADF outer (α)"}),
-        step: Inputs.range([0.25, 0.75], {value: 0.5, step: 0.25, label: "scan step (Å)"})
+        rotation: Inputs.range([0, 90], {value: 22.5, step: 2.5, label: "rotation (°)"})
       }),
-      {columns: 2, minWidth: 0, compact: true}
+      {columns: 1, minWidth: 0, compact: true}
     )
   </script>
   <script id="16" type="text/x-typescript">
@@ -157,14 +167,15 @@
     const multisliceOn = Generators.input(multisliceToggle)
   </script>
   <script id="19" type="text/x-typescript">
-    const instrumentForm = collapsible("detector & scan", (() => {
-      const box = document.createElement("div");
+    const instrumentForm = instrumentFields
+  </script>
+  <script id="15c" type="text/x-typescript">
+    const buttonRow = (() => {
       const line = row([multisliceToggle, scanButton, clearButton], {gap: 10, align: "center"});
-      line.style.marginTop = "4px";
+      line.style.marginTop = "6px";
       line.style.justifyContent = "flex-start";
-      box.append(instrumentFields, line);
-      return box;
-    })(), true)
+      return line;
+    })()
   </script>
   <script id="20" type="text/x-typescript">
     const scanButton = toggleButton({on: "■ pause scan", off: "▶ scan", value: false})
@@ -327,7 +338,7 @@
         alpha: a,
         inner: cap(instrument.inner),
         outer: cap(instrument.outer),
-        adfOuter: cap(instrument.adfOuter)
+        adfOuter: cap(optics.adfOuter)
       };
     })()
   </script>
@@ -454,7 +465,7 @@
       optics; instrument; specimenControls; clearCount; nSlices;
       // A whole number of pixels per step, so shifting the probe by an index is
       // exact rather than interpolated.
-      const stride = Math.max(1, Math.round(instrument.step / sampling[0]));
+      const stride = Math.max(1, Math.round(specimenControls.step / sampling[0]));
       const nx = Math.floor(gpts[0] / stride);
       const ny = Math.floor(gpts[1] / stride);
       return {
@@ -566,13 +577,33 @@
       controlBox.style.gridTemplateColumns = "repeat(2, minmax(0, 1fr))";
       controlBox.style.columnGap = "14px";
       controlBox.style.width = "100%";
+      // `display: contents` on each form, so that all ten controls are items of
+      // one grid and fill it in DOM order — two to a row, in pairs that belong
+      // together: the specimen, then the probe, then the dose and the step it is
+      // scanned at, then the detector's two radii, then how it is cut up.
+      //
+      // Three separate forms rather than one, still, because a cell that reads
+      // `form.value.x` depends on the whole form: merged, turning the detector
+      // rotation would rebuild the specimen's atoms and its potential.
+      // A rule between the blocks rather than three labelled drawers. The
+      // grouping is worth keeping — what the specimen is, what the probe is,
+      // what the detector does with it — but a `details`/`summary` per block
+      // spent a line of its own on each heading, and all three were always open.
+      const rule = () => {
+        const line = document.createElement("div");
+        line.style.gridColumn = "1 / -1";
+        line.style.borderTop =
+          "1px solid var(--theme-foreground-faintest, rgba(128,128,128,0.25))";
+        line.style.margin = "5px 0 7px";
+        return line;
+      };
       for (const form of [specimenForm, opticsForm, instrumentForm]) {
-        form.style.minWidth = "0";
+        form.style.display = "contents";
         controlBox.appendChild(form);
+        controlBox.appendChild(rule());
       }
-      // Specimen and optics share the top row; the instrument spans both, so its
-      // own controls lay out in two even columns.
-      instrumentForm.style.gridColumn = "1 / -1";
+      buttonRow.style.gridColumn = "1 / -1";
+      controlBox.appendChild(buttonRow);
 
       const right = column([signalPanels.node, controlBox], {align: "stretch"});
 
@@ -801,10 +832,14 @@
       }
 
       // --- what the probe sees right now ------------------------------------
-      // Snap a reader-driven probe onto the scan grid. The measurement is then
-      // exactly that pixel's value, so an unvisited pixel can simply be filled in
-      // — hovering paints the image rather than only reading it — and the marker
-      // lands on a pixel centre rather than between two.
+      // Snap a reader-driven probe onto the scan grid, so the marker lands on a
+      // pixel centre rather than between two.
+      //
+      // Hovering reads the signals; it does not write them. It used to fill in
+      // whatever pixel the pointer passed over, which is defensible — the value
+      // is exactly that pixel's — but it looks like painting, and a sparse
+      // scribble of visited pixels across four otherwise empty panels reads as
+      // an artefact rather than as a measurement. The scan is what fills them.
       if (!rastering) {
         const sr = Math.min(scan.nx - 1, Math.max(0, Math.round(probeState.row / scan.stride)));
         const sc = Math.min(scan.ny - 1, Math.max(0, Math.round(probeState.col / scan.stride)));
@@ -817,19 +852,6 @@
         displayCache.value = measureAt(probeState.row, probeState.col, {keepExit: true});
       }
       const here = displayCache.value;
-
-      if (!rastering) {
-        const cell = Math.round(probeState.row / scan.stride) * scan.ny +
-                     Math.round(probeState.col / scan.stride);
-        if (cell >= 0 && cell < cells && !scan.seen[cell]) {
-          scan.abf[cell] = here.abf;
-          scan.adf[cell] = here.adf;
-          scan.comX[cell] = here.comX;
-          scan.comY[cell] = here.comY;
-          scan.seen[cell] = 1;
-          scan.count++;
-        }
-      }
 
       // The probe sits at index (0, 0), so roll the exit wave to bring it to the
       // middle before cutting the square crop out.
@@ -935,6 +957,11 @@
       dp.ctx.clearRect(0, 0, dp.width, dp.height);
       dp.ctx.imageSmoothingEnabled = true;
       dp.ctx.drawImage(dpCanvas.canvas, 0, 0, dp.width, dp.height);
+      // The panel's half-width is the largest angle the grid represents, so the
+      // whole panel spans twice it.
+      drawScalebar(dp.ctx, {
+        extent: 2 * maxAngle, units: "mrad", box: [dp.width, dp.height]
+      });
       // The detectors, drawn over the pattern they collect. A slider that changes
       // nothing visible is a slider nobody touches, and the point of the widget is
       // that the region you add up decides the image.
@@ -998,6 +1025,12 @@
       underPanels.panels[0].ctx.imageSmoothingEnabled = true;
       underPanels.panels[0].ctx.drawImage(
         exitCanvas, 0, 0, underPanels.panels[0].width, underPanels.panels[0].height);
+      // `box` because these contexts come from `makeCanvas` and are already
+      // scaled to CSS pixels; see `drawScalebar`.
+      drawScalebar(underPanels.panels[0].ctx, {
+        extent: cropWidth * sampling[0],
+        box: [underPanels.panels[0].width, underPanels.panels[0].height]
+      });
 
       // --- signal panels ----------------------------------------------------
       // Repainted when a scan row completes, not every frame. Four colormapped
@@ -1055,16 +1088,24 @@
       signalPanels.panels.forEach((panel, i) => {
         panel.ctx.clearRect(0, 0, panel.width, panel.height);
         panel.ctx.drawImage(panelLayers[i].canvas, 0, 0);
-        if (markX < 0 || markX > 1 || markY < 0 || markY > 1) return;
-        const mx = markX * panel.width, my = markY * panel.height;
-        panel.ctx.save();
-        panel.ctx.lineWidth = 2.5;
-        panel.ctx.strokeStyle = "rgba(0,0,0,0.55)";
-        panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
-        panel.ctx.lineWidth = 1.2;
-        panel.ctx.strokeStyle = "rgba(255,255,255,0.95)";
-        panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
-        panel.ctx.restore();
+        if (markX >= 0 && markX <= 1 && markY >= 0 && markY <= 1) {
+          const mx = markX * panel.width, my = markY * panel.height;
+          panel.ctx.save();
+          panel.ctx.lineWidth = 2.5;
+          panel.ctx.strokeStyle = "rgba(0,0,0,0.55)";
+          panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
+          panel.ctx.lineWidth = 1.2;
+          panel.ctx.strokeStyle = "rgba(255,255,255,0.95)";
+          panel.ctx.beginPath(); panel.ctx.arc(mx, my, 4, 0, 2 * Math.PI); panel.ctx.stroke();
+          panel.ctx.restore();
+        }
+        // All four are images of the same scanned field, so they share one bar.
+        // Drawn after the marker, not before: the marker goes wherever the probe
+        // is, which is sometimes exactly where the bar's label is, and of the two
+        // the bar is the one that has to stay legible. These panels are empty —
+        // and on a light page, white — until the scan fills them, which is what
+        // the scalebar's halo is for.
+        drawScalebar(panel.ctx, {extent: fov[0], box: [panel.width, panel.height]});
       });
 
       readout.textContent =

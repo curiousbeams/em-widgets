@@ -107,8 +107,17 @@
   <script id="8" type="text/x-typescript">
     const controlFields = gridControls(
       Inputs.form({
+        // Shown short. Spelled out, the three options are 375px of text in a
+        // 211px column at prose width and wrap onto three lines, which is one
+        // line per option and reads as a list rather than a choice. The keys
+        // stay descriptive because they are what the code looks scenes up by.
         scene: Inputs.radio(Object.keys(SCENES), {
-          value: "two convex sets", label: "sets"
+          value: "two convex sets", label: "sets",
+          format: (k) => ({
+            "two convex sets": "convex",
+            "two non-convex sets": "non-convex",
+            "three sets": "multiple"
+          })[k]
         }),
         method: Inputs.radio([...Object.keys(namedParameters()), "generalised"], {
           value: "AP", label: "algorithm"

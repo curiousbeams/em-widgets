@@ -85,6 +85,15 @@ const THEME_CSS = `
 .em-notebook--cell:empty { min-height: 0; }
 .em-notebook--cell { max-width: 100%; }
 .em-notebook svg, .em-notebook canvas, .em-notebook img { max-width: 100%; }
+/* A displayed equation is the one thing here that cannot be made narrower, and
+   KaTeX lays an aligned environment out a couple of pixels wider than the
+   column it was measured in — enough to give the whole page a horizontal
+   scrollbar. Let the equation scroll inside its own line instead of pushing
+   everything else. (No backticks in this block: it lives in a template
+   literal.) */
+.em-notebook .katex-display {
+  display: block; max-width: 100%; overflow-x: auto; overflow-y: hidden;
+}
 
 /* Observable Inputs read these; keep them legible against the host background. */
 .em-notebook form[class^="inputs-"] { font: 13px var(--monospace); color: var(--theme-foreground); }
