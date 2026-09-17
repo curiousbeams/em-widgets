@@ -431,9 +431,12 @@ let flowCount = 0;
  *   content?: HTMLElement, row?: number, column?: number, rowSpan?: number,
  *   colSpan?: number, cursor?: string}>} nodes
  * @param {Array<{from: string, to: string, label?: string,
- *   route?: "auto"|"h"|"v", bias?: number}>} links `from` and `to` are node
- *   keys. `bias` moves the corner of an elbow along the run, 0 being hard
- *   against the start and 1 against the end; the default 0.5 is the midpoint.
+ *   route?: "auto"|"h"|"v", bias?: number, anchor?: "centre"|"overlap"}>} links
+ *   `from` and `to` are node keys. `bias` moves the corner of an elbow along the
+ *   run, 0 being hard against the start and 1 against the end; the default 0.5
+ *   is the midpoint. `anchor: "overlap"` meets each panel at the middle of the
+ *   span the two share rather than at its own centre, which is what a panel
+ *   spanning several rows needs when more than one link touches it.
  * @param {object} [options]
  * @param {number} [options.gap=30] space between grid cells, which is where the
  *   arrows and their labels go
@@ -453,6 +456,9 @@ export function flowDiagram(nodes, links, {gap = 30, divider = null} = {}) {
   const root = document.createElement("div");
   root.className = "em-flow";
   root.style.gap = `${gap}px`;
+  // Somewhere for a divider's label to sit. Without it the label is drawn over
+  // the top edge of whichever panel the rule runs past.
+  if (divider?.label) root.style.paddingTop = "15px";
   ensureStyles(root);
 
   const id = `em-flow-${++flowCount}`;
@@ -552,17 +558,28 @@ export function flowDiagram(nodes, links, {gap = 30, divider = null} = {}) {
       const b = box(link.to, !horizontal);
 
       const bias = link.bias ?? 0.5;
+      // Where a link meets a panel that spans more rows or columns than the one
+      // at the other end. Centre to centre is the default and is right when the
+      // two are the same size. It is wrong when a tall panel has two links, one
+      // from a panel above and one from a panel below: both would arrive at the
+      // same point on its edge, and the two paths would run along each other to
+      // get there. `overlap` aims at the middle of the range the two panels
+      // share instead, which makes each link a straight line to the panel it
+      // actually comes from.
+      const shared = (lo, hi) => (link.anchor === "overlap" && lo < hi ? (lo + hi) / 2 : null);
       let start;
       let end;
       let mid;
       if (horizontal) {
         const forward = b.cx >= a.cx;
-        start = {x: forward ? a.right : a.left, y: a.cy};
-        end = {x: forward ? b.left : b.right, y: b.cy};
+        const y = shared(Math.max(a.top, b.top), Math.min(a.bottom, b.bottom));
+        start = {x: forward ? a.right : a.left, y: y ?? a.cy};
+        end = {x: forward ? b.left : b.right, y: y ?? b.cy};
       } else {
         const down = b.cy >= a.cy;
-        start = {x: a.cx, y: down ? a.bottom : a.top};
-        end = {x: b.cx, y: down ? b.top : b.bottom};
+        const x = shared(Math.max(a.left, b.left), Math.min(a.right, b.right));
+        start = {x: x ?? a.cx, y: down ? a.bottom : a.top};
+        end = {x: x ?? b.cx, y: down ? b.top : b.bottom};
       }
       mid = {
         x: start.x + bias * (end.x - start.x),
@@ -587,11 +604,15 @@ export function flowDiagram(nodes, links, {gap = 30, divider = null} = {}) {
 
       const text = labels.get(`${link.from}>${link.to}`) ?? link.label;
       if (text) {
+        // Beside a straight vertical line, above a horizontal one or an elbow.
+        // A vertical run has no side to sit above: centring the label on it puts
+        // the line through the middle of the words.
+        const beside = aligned && !horizontal;
         const node = make("text", {
-          // Above the line either way, rather than struck through by it.
-          x: mid.x, y: mid.y - 5,
-          "text-anchor": "middle",
-          "dominant-baseline": "auto",
+          x: beside ? mid.x + 6 : mid.x,
+          y: beside ? mid.y : mid.y - 5,
+          "text-anchor": beside ? "start" : "middle",
+          "dominant-baseline": beside ? "middle" : "auto",
           fill: "currentColor", "fill-opacity": 0.75,
           "paint-order": "stroke",
           stroke: "var(--theme-background, #fff)", "stroke-width": 3,

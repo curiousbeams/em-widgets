@@ -47,6 +47,14 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
 }
 :::
 
+## Iterative ptychography
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/iterative-ptychography.html"
+}
+:::
+
 ## Probe aberrations
 
 :::{anywidget} ../observable-notebook.mjs

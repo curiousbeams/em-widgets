@@ -73,10 +73,14 @@ export function measurePosition(objectPhase, probeReal, n, row, col, scratch, ou
  * @param {number} [options.dose=Infinity] electrons per square Angstrom
  * @param {[number, number]} [options.sampling=[1,1]] object sampling [Angstrom]
  * @param {boolean} [options.amplitude=false] store `sqrt(I)` rather than `I`
+ * @param {"kr"|"rk"} [options.layout="kr"] which axis runs slowest. `"kr"` puts
+ *   each virtual image in one contiguous run, which is what the direct methods
+ *   read; `"rk"` puts each diffraction pattern in one, which is what an
+ *   iterative method reads. Both are the same numbers — but the wrong one turns
+ *   every read into a cache miss.
  * @param {() => number} [options.random=Math.random]
  * @returns {{step(count: number): number, data: Float32Array, total: number,
  *   done: number, nDetector: number, m: number}}
- *   `data` is laid out `[k][R]` — k-major, so each virtual image is contiguous
  */
 export function forwardModel({
   objectPhase,
@@ -87,6 +91,7 @@ export function forwardModel({
   dose = Infinity,
   sampling = [1, 1],
   amplitude = false,
+  layout = "kr",
   random = Math.random
 }) {
   if (n % m !== 0) {
@@ -96,6 +101,7 @@ export function forwardModel({
   const indices = bfIndices ?? Int32Array.from({length: n * n}, (_, i) => i);
   const nDetector = indices.length;
   const total = m * m;
+  const byPosition = layout === "rk";
 
   // Electrons per pattern, from the dose and the area one scan position covers.
   const stepArea = stride * sampling[0] * stride * sampling[1];
@@ -120,18 +126,23 @@ export function forwardModel({
       const scale = patternTotal > 0 ? electrons / patternTotal : 0;
 
       const scanIndex = scanRow * m + scanCol;
+      const positionBase = scanIndex * nDetector;
       for (let j = 0; j < nDetector; j++) {
         let value = pattern[indices[j]];
         if (Number.isFinite(electrons)) {
           value = poisson(value * scale, random) / scale;
         }
-        data[j * total + scanIndex] = amplitude ? Math.sqrt(Math.max(0, value)) : value;
+        const at = byPosition ? positionBase + j : j * total + scanIndex;
+        data[at] = amplitude ? Math.sqrt(Math.max(0, value)) : value;
       }
     }
     return total - done;
   };
 
-  return {step, data, total, done: 0, nDetector, m, get progress() { return done / total; }};
+  return {
+    step, data, total, done: 0, nDetector, m, layout,
+    get progress() { return done / total; }
+  };
 }
 
 /**

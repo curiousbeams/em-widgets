@@ -1,0 +1,1115 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Iterative ptychography</title>
+  <script id="1" type="text/markdown">
+    # ePIE, one scan position at a time
+  </script>
+  <script id="2" type="text/markdown">
+    The direct methods invert one linear operator once. The ptychographical
+    iterative engine gives that up and solves the nonlinear problem by
+    repetition. It keeps a guess at the specimen, works out what the detector
+    would have recorded from that guess at one scan position, replaces the
+    modelled amplitude with the measured one, and pushes the difference back into
+    the guess. Then it moves to another position and does it again.
+
+    ${tex.block`\begin{aligned} \psi(\mathbf{r}) &= e^{i\varphi(\mathbf{r})}\,P(\mathbf{r}-\mathbf{R}) \\ \Psi(\mathbf{k}) &= \mathcal{F}\left[\psi\right] \\ \Delta\Psi(\mathbf{k}) &= \sqrt{I(\mathbf{k})}\,\frac{\Psi(\mathbf{k})}{\left|\Psi(\mathbf{k})\right|} - \Psi(\mathbf{k}) \\ \Delta\varphi(\mathbf{r}) &= \frac{1}{\max\left|P\right|^{2}}\,\mathrm{Im}\left\{e^{-i\varphi}\,P^{*}(\mathbf{r}-\mathbf{R})\,\mathcal{F}^{-1}\left[\Delta\Psi\right]\right\} \\ \varphi(\mathbf{r}) &= \max\left\{\varphi(\mathbf{r}) + \beta\,\Delta\varphi(\mathbf{r}),\; 0\right\} \end{aligned}`}
+
+    The first line forms the exit wave, the second says what the detector would
+    have recorded from it, the third replaces the modelled modulus with the
+    measured one, and the last two push the difference back into the specimen.
+
+    Only the third line uses the measurement, and it is a projection: it returns
+    the nearest wave with the amplitude that was actually recorded. The
+    already-shipped [projection sets](./projection-sets.html) widget follows the
+    same operation in two dimensions, where you can watch it overshoot and stall;
+    here it runs in ${tex`96^2`} of them at once.
+
+    **Hover anywhere over the specimen** to put the probe there and run one update.
+    Nothing has happened yet when the widget loads, so this is the way to see what
+    a single scan position contributes before the scan runs away with it. **Press
+    play** to visit every position in a shuffled order, reshuffled each pass.
+    **Reset** puts the specimen back to vacuum and parks the probe in the middle
+    again, without re-simulating the experiment.
+
+    **Inspect** changes what hovering does: the whole calculation still runs at
+    each position you pass over, so the exit wave, the two patterns, the
+    correction and the gradient all fill in, but the step is never applied and
+    the specimen stays where it was. It is the way to ask a reconstruction that has
+    already converged what each position still sees — which positions it fits
+    well, and where the gradient says there is something left to find — without
+    changing the answer by asking. The arrow back into the specimen reads
+    **held** while it is on.
+
+    With **probe: known** the probe is held exactly as it was set and only the
+    specimen is solved for. The exit wave still changes from step to step,
+    because it is the probe times the object and the object is what is being
+    found. **Unknown** starts from a probe with the wrong defocus and refines it
+    alongside the specimen, by the same expression with the two swapped — the
+    extension the e in ePIE stands for, and what a real experiment has to do.
+
+    The specimen is solved for as a **potential** rather than as a general complex
+    object: ${tex`O = e^{i\varphi}`} with ${tex`\varphi`} real, which is what a
+    specimen this thin is. Two things follow. The update ${tex`\Delta\varphi`} is
+    a real field, so the gradient panel needs no domain colouring. And
+    ${tex`\varphi`} can be held at or above zero — the specimen may retard the
+    wave but not advance it — which is worth more than it sounds: the
+    measurement fixes ${tex`e^{i\varphi}`}, so it fixes ${tex`\varphi`} only up to
+    an additive constant, and saying the potential is non-negative is what picks
+    that constant out.
+
+    One note on the ${tex`\Delta\Psi`} panel. The exit wave is built on the whole
+    grid with the probe moved to the scan position, so its transform carries a
+    phase ramp from that displacement — which is right, and is what brings the
+    gradient home to the correct place. It is drawn with that ramp taken back
+    out, which is the view a code that crops the object around the probe would
+    give anyway; left in, the panel is a rainbow that turns over once per pixel
+    of displacement and nothing underneath it can be seen. It is a choice about
+    the picture, not about the reconstruction.
+
+    The data is simulated, so dose is a control. Defocus sets how wide the probe
+    is, and with it how far neighbouring positions overlap, which the line under
+    the diagram reports. That overlap is the condition ptychography rests on: at
+    three quarters the reconstruction is done within a few passes, at a half it
+    crawls, and with the probe in focus — barely wider than the scan step — it
+    never converges at all.
+  </script>
+
+  <script id="3" type="text/x-typescript">
+    const controlsView = display(controlPanel);
+  </script>
+  <script id="3b" type="text/x-typescript">
+    const cycleView = display(flow.node);
+  </script>
+  <script id="3c" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+  <script id="3d" type="text/x-typescript">
+    const errorView = display(errorHost);
+  </script>
+
+  <script id="4" type="text/x-typescript" pinned="">
+    import {
+      electronWavelength, angularSpatialFrequencies,
+      complexProbe,
+      complex, ifft2, fftshift, fftshiftComplex,
+      applyColormap, complexToRGB, histogramScaling,
+      blit, drawScalebar, niceScalebarLength, currentColor, withAlpha, ensureStyles,
+      mulberry32,
+      forwardModel,
+      epieState, epieStep, epieReset, reconstructedPhase, scanOrder, probeDiameter,
+      centreSpectrum,
+      controls as gridControls, badge, row, flowDiagram, toggleButton,
+      SERIES, frames, whenVisible, qualityBudget
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="4b" type="text/x-typescript" pinned="">
+    import {resolveAsset} from "https://curiousbeams.github.io/em-widgets/kit/data.js"
+  </script>
+
+  <!-- Geometry -->
+  <script id="5" type="text/x-typescript" pinned="">
+    // Object, detector and reconstruction share one grid. Unlike the direct
+    // methods, ePIE uses the whole detector rather than the bright-field disc,
+    // so the resolution it can reach is set by this grid and not by the
+    // aperture.
+    const n = 96
+  </script>
+  <script id="6" type="text/x-typescript" pinned="">
+    const energy = 300e3
+  </script>
+  <script id="7" type="text/x-typescript" pinned="">
+    const wavelength = electronWavelength(energy)
+  </script>
+  <script id="8" type="text/x-typescript" pinned="">
+    // A twelve-pixel aperture, so the focused probe is already several pixels
+    // across and defocus widens it from there.
+    const radiusPixels = 12
+  </script>
+  <script id="9" type="text/x-typescript">
+    // Scan positions per side, rather than a step in Angstroms, so that the
+    // control means the same thing for all three specimens — their fields of
+    // view differ by a factor of eight.
+    //
+    // Each option has to divide the object grid, so that the probe moves by a
+    // whole number of pixels and no interpolation is needed anywhere. Sixteen is
+    // coarser than it sounds: what matters is the step against the probe's
+    // width, and a probe thirty pixels across at a six-pixel step overlaps its
+    // neighbour by four fifths. The settings cost their square in both memory
+    // and work per pass — 5, 9 and 21 MB of amplitudes.
+    const scanInput = Inputs.select([12, 16, 24], {
+      value: 16, label: "scan points", format: (v) => `${v} × ${v}`
+    })
+  </script>
+  <script id="9b" type="text/x-typescript">
+    const m = settled(scanInput)
+  </script>
+  <script id="10" type="text/x-typescript">
+    const stride = n / m
+  </script>
+  <script id="10b" type="text/x-typescript">
+    // Where the probe sits before anything has happened: the middle of the field
+    // of view, so the widget opens on something recognisable.
+    const home = ((m >> 1) * m) + (m >> 1)
+  </script>
+  <script id="11" type="text/x-typescript" pinned="">
+    // The same three projected potentials the direct-methods widget uses, each
+    // scaled to about 0.09 rad root-mean-square. They differ by an order of
+    // magnitude in field of view, so each sets its own sampling, semiangle and
+    // sensible defocus.
+    //
+    // And its own dose. A dose is electrons per square Angstrom of specimen, so
+    // the electrons that land in one diffraction pattern are that times the area
+    // one scan position covers — and these three differ by a factor of sixty in
+    // that area. The same number on the control would mean four electrons per
+    // detector pixel for strontium titanate and thirty thousand for
+    // apoferritin, which no camera would survive. Each specimen therefore gets
+    // its own decade of doses, chosen so that the top of each list lands at a
+    // few hundred electrons per pixel. The readout reports both numbers.
+    const SPECIMENS = ({
+      apoF: {
+        label: "apoferritin", file: "apoF-potential.f32", extent: 192.0,
+        doses: [1e1, 1e2, 1e3, 1e4, Infinity], dose: 1e4
+      },
+      mof: {
+        label: "MOF", file: "mof-potential.f32", extent: 44.8,
+        doses: [1e2, 1e3, 1e4, 1e5, Infinity], dose: 1e5
+      },
+      sto: {
+        label: "SrTiO₃", file: "sto-potential.f32", extent: 23.67,
+        doses: [1e3, 1e4, 1e5, 1e6, Infinity], dose: 1e6
+      }
+    })
+  </script>
+
+  <!-- Controls -->
+  <script id="12" type="text/x-typescript">
+    // Same order and same default as the direct-methods widget, so the two read
+    // as one pair rather than two unrelated experiments.
+    const specimenInput = Inputs.radio(Object.keys(SPECIMENS), {
+      value: "apoF", label: "specimen", format: (k) => SPECIMENS[k].label
+    })
+  </script>
+  <script id="13" type="text/x-typescript">
+    // Rebuilt with the specimen, like the defocus slider, and for the same
+    // reason: the numbers that mean anything differ by two decades between them.
+    const doseInput = (() => {
+      const input = Inputs.select(SPECIMENS[specimen].doses, {
+        value: SPECIMENS[specimen].dose, label: "dose (e⁻/Å²)",
+        format: (d) => (Number.isFinite(d) ? d.toExponential(0) : "noiseless")
+      });
+      doseHost.replaceChildren(input);
+      return input;
+    })()
+  </script>
+  <script id="14" type="text/x-typescript">
+    const betaInput = Inputs.range([0.05, 1], {value: 0.9, step: 0.05, label: "step size β"})
+  </script>
+  <script id="15" type="text/x-typescript">
+    // Whether the reconstruction is told the probe.
+    //
+    // "known" is the textbook setting and converges fastest. "unknown" starts
+    // from a probe with the wrong defocus and refines it alongside the object,
+    // by the same expression with the two swapped — which is the extension the
+    // e in ePIE stands for, and what a real experiment has to do.
+    const probeInput = Inputs.radio(["known", "unknown"], {
+      value: "known", label: "probe",
+      format: (k) => (k === "known" ? "known" : "unknown, refined")
+    })
+  </script>
+  <script id="16" type="text/x-typescript">
+    // Stable hosts for the two controls whose values follow the specimen.
+    // Swapping the input inside a host leaves the surrounding grid untouched.
+    const defocusHost = htl.html`<div></div>`
+  </script>
+  <script id="16b" type="text/x-typescript">
+    const doseHost = htl.html`<div></div>`
+  </script>
+  <script id="17" type="text/x-typescript">
+    // Debounced and per field, so that changing one control does not re-run the
+    // cells that depend on the others. A cell reading `form.value.x` would
+    // depend on the whole form, and for the controls that re-simulate that means
+    // a second of work thrown away every time.
+    const settled = (input, quiet = 140) => Generators.observe((notify) => {
+      let last = input.value;
+      let timer;
+      const emit = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (input.value !== last) {
+            last = input.value;
+            notify(last);
+          }
+        }, quiet);
+      };
+      notify(last);
+      input.addEventListener("input", emit);
+      return () => {
+        clearTimeout(timer);
+        input.removeEventListener("input", emit);
+      };
+    })
+  </script>
+  <script id="18" type="text/x-typescript">
+    const specimen = settled(specimenInput)
+  </script>
+  <script id="19" type="text/x-typescript">
+    const dose = settled(doseInput)
+  </script>
+  <script id="20" type="text/x-typescript">
+    const probeKnown = settled(probeInput) === "known"
+  </script>
+
+  <script id="21" type="text/x-typescript">
+    const extent = SPECIMENS[specimen].extent
+  </script>
+  <script id="22" type="text/x-typescript">
+    const sampling = ([extent / n, extent / n])
+  </script>
+  <script id="23" type="text/x-typescript">
+    const dk = 1 / extent
+  </script>
+  <script id="24" type="text/x-typescript">
+    const semiangle = radiusPixels * dk * wavelength * 1e3
+  </script>
+  <script id="25" type="text/x-typescript">
+    // Defocus expressed as the probe width it produces.
+    //
+    // A defocused probe is a shadow image of the aperture, `2 |C10| alpha`
+    // across; in pixels of this grid that is
+    // `2 |C10| radiusPixels lambda n / L^2`. Inverting it lets the slider be
+    // stated in the quantity that matters — how many pixels the probe covers,
+    // and so how far it overlaps its neighbour — while still reading in
+    // nanometres, which is what a microscope column is set in.
+    const defocusFor = (diameterPixels) =>
+      (diameterPixels * extent * extent) / (2 * radiusPixels * wavelength * n) / 10
+  </script>
+  <script id="26" type="text/x-typescript">
+    // Rebuilt when the specimen changes, because the same probe width is twelve
+    // nanometres for strontium titanate and two thousand for apoferritin.
+    // Changing specimen is a click rather than a drag, and the slider lives in a
+    // host, so nothing is torn out from under a gesture.
+    const defocusInput = (() => {
+      // A round step, so the number beside the slider is short enough to read in
+      // a third of the widget's width. One significant figure of the hundredth
+      // of the range, which across these three specimens is 0.5, 2 and 50 nm.
+      const span = defocusFor(44);
+      const decade = 10 ** Math.floor(Math.log10(span / 100));
+      const step = Math.max(decade, Math.round(span / 100 / decade) * decade);
+      const input = Inputs.range([0, Math.round(span / step) * step], {
+        value: Math.round(defocusFor(28) / step) * step, step, label: "defocus (nm)"
+      });
+      defocusHost.replaceChildren(input);
+      return input;
+    })()
+  </script>
+  <script id="27" type="text/x-typescript">
+    const defocus = settled(defocusInput)
+  </script>
+  <script id="28" type="text/x-typescript">
+    // `C10 = -defocus`, following abtem.
+    const aberrations = ({C10: -defocus * 10})
+  </script>
+
+  <!-- Specimen and probe -->
+  <script id="29" type="text/x-typescript">
+    // Phase shift in radians, scaled when the file was written. Raw
+    // little-endian float32: one fetch, no decoding.
+    //
+    // The files are mean subtracted, and this puts the floor back at zero
+    // instead. A projected potential is non-negative — vacuum is zero and the
+    // specimen retards the wave — which is what the reconstruction is allowed to
+    // assume, so the thing it is being compared against had better satisfy it
+    // too. The shift changes no measurement: a constant added to the phase
+    // multiplies the object by a constant phase factor, which the detector
+    // cannot see.
+    const objectPhase = await (async () => {
+      const url = resolveAsset(
+        `https://curiousbeams.github.io/em-widgets/data/${SPECIMENS[specimen].file}`
+      );
+      const buffer = await (await fetch(url)).arrayBuffer();
+      const phase = Float64Array.from(new Float32Array(buffer));
+      let floor = Infinity;
+      for (const value of phase) if (value < floor) floor = value;
+      for (let i = 0; i < phase.length; i++) phase[i] -= floor;
+      return phase;
+    })()
+  </script>
+  <script id="30" type="text/x-typescript">
+    const grid = angularSpatialFrequencies([n, n], sampling, wavelength)
+  </script>
+  <script id="31" type="text/x-typescript">
+    const realProbe = (extra) => {
+      const p = complexProbe({
+        gpts: [n, n], sampling, energy, semiangleCutoff: semiangle,
+        aberrations: {...aberrations, ...extra}
+      });
+      return ifft2({re: Float64Array.from(p.re), im: Float64Array.from(p.im)}, n, n);
+    }
+  </script>
+  <script id="32" type="text/x-typescript">
+    // The probe the experiment is done with.
+    const probeReal = realProbe({})
+  </script>
+  <script id="33" type="text/x-typescript">
+    // The probe the reconstruction starts from. Half the defocus when the probe
+    // is unknown: wrong enough that holding it there leaves visible artefacts,
+    // close enough that the refinement has somewhere to start from, which is
+    // roughly where a real initial guess sits.
+    const startProbe = probeKnown ? probeReal : realProbe({C10: aberrations.C10 * 0.5})
+  </script>
+  <script id="34" type="text/x-typescript">
+    const probeWidth = probeDiameter(probeReal, n)
+  </script>
+  <script id="34b" type="text/x-typescript">
+    // What the dose actually means at this scan step, which is the number a
+    // camera would have to cope with. It is the one place the three specimens
+    // are comparable: their dose figures differ by two decades and their
+    // patterns do not, because the scan steps differ by eight.
+    const electronsPerPattern = (() => {
+      if (!Number.isFinite(dose)) return "noiseless";
+      const area = (stride * sampling[0]) * (stride * sampling[1]);
+      const electrons = dose * area;
+      return `${electrons.toExponential(1)} e⁻ per pattern` +
+        ` (${(electrons / (n * n)).toFixed(0)} per pixel)`;
+    })()
+  </script>
+  <script id="35" type="text/x-typescript">
+    const overlap = Math.max(0, 1 - stride / Math.max(probeWidth, 1))
+  </script>
+
+  <!-- Run state -->
+  <script id="36" type="text/x-typescript">
+    // A fresh experiment whenever the specimen, the probe or the dose changes.
+    //
+    // The whole four-dimensional dataset is kept, not a bright-field subset:
+    // ePIE reads every detector pixel at every position. At this size that is
+    // 5 MB, which is why the grid and the scan are what they are.
+    const run = (() => {
+      // A new dataset means the reconstruction in progress describes nothing, so
+      // playback stops rather than carrying a reader through a transition they
+      // did not ask for.
+      if (playButton.value) {
+        playButton.value = false;
+        playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+      }
+      const model = forwardModel({
+        objectPhase, probeReal, n, m, dose, sampling,
+        amplitude: true, layout: "rk", random: mulberry32(1)
+      });
+      return {model, ready: false};
+    })()
+  </script>
+  <script id="37" type="text/x-typescript">
+    // A fresh reconstruction whenever the data or the starting probe changes.
+    // Not when β changes — the loop reads that live, so the step size can be
+    // turned mid-run, which is how you find out what it does.
+    const reconstruction = (() => {
+      run;
+      const random = mulberry32(7);
+      return {
+        // A potential rather than a general complex object, held non-negative.
+        // See the prose above: it makes the update real, and it is what fixes
+        // the additive constant the measurement leaves free.
+        state: epieState({
+          n, m, probe: startProbe, objectType: "potential", positivity: true
+        }),
+        random,
+        // Shuffled, and not as a detail: visiting the scan in raster order lets
+        // each update undo much of the last one at the same edge, and the
+        // reconstruction develops stripes along the scan direction. Reshuffled
+        // at the end of every pass, so that no position is permanently the one
+        // that goes last.
+        order: scanOrder(m * m, random),
+        cursor: 0,
+        passes: 0,
+        visits: 0,
+        last: home,
+        // `shown` is whether the four stage panels hold anything; `visits` is
+        // how many updates have been applied. Inspection moves the first
+        // without moving the second.
+        shown: false,
+        inspected: false,
+        history: []
+      };
+    })()
+  </script>
+
+  <!-- Playback -->
+  <script id="38" type="text/x-typescript">
+    const playButton = toggleButton({on: "⏸ pause", off: "▶ play", value: false})
+  </script>
+  <script id="39" type="text/x-typescript">
+    // Read directly rather than through a reactive cell. A `Generators.input`
+    // value arrives a tick after the button changes, which is enough for a reset
+    // to run itself to completion while the button says stopped.
+    const isRunning = () => playButton.value
+  </script>
+  <script id="40" type="text/x-typescript">
+    // Two bars, because they count unrelated things: one is the experiment being
+    // simulated, which happens once and then not again until a parameter
+    // changes, and the other is how far through the current pass over the scan
+    // the reconstruction has got.
+    const meter = (colour) => {
+      const fill = htl.html`<div style="height:100%;width:0%;background:${colour};
+        border-radius:3px;transition:width 100ms linear;"></div>`;
+      const track = htl.html`<div style="height:6px;width:64px;border-radius:3px;
+        background:var(--theme-foreground-faintest, rgba(128,128,128,0.25));
+        overflow:hidden;flex:0 0 auto;">${fill}</div>`;
+      const label = htl.html`<span style="font-size:11px;white-space:nowrap;
+        color:var(--theme-foreground-muted, inherit);"></span>`;
+      const node = row([track, label], {gap: 8});
+      node.style.justifyContent = "flex-start";
+      node.style.flex = "0 0 auto";
+      node.style.flexWrap = "nowrap";
+      node.style.alignItems = "center";
+      node.set = (fraction, text) => {
+        fill.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
+        label.textContent = text;
+      };
+      return node;
+    }
+  </script>
+  <script id="40b" type="text/x-typescript">
+    const simulationMeter = meter(SERIES[2])
+  </script>
+  <script id="40c" type="text/x-typescript">
+    const passMeter = meter(SERIES[0])
+  </script>
+  <script id="39b" type="text/x-typescript">
+    // Hover without applying.
+    //
+    // Once a reconstruction is a few passes in, the reader's question changes:
+    // not "what does the next update do" but "what does this position see, and
+    // what would it still like to change". Asking that should not alter the
+    // answer, so in this mode a hover runs the whole calculation at a step size
+    // of zero and leaves the specimen alone.
+    //
+    // The same label either way — the kit's toggle fills in when it is pressed,
+    // which is the state worth showing. Play does the same while it plays.
+    const inspectButton = toggleButton({on: "inspect", off: "inspect", value: false})
+  </script>
+  <script id="40d" type="text/x-typescript">
+    // Back to vacuum, without re-simulating: the data has not changed, only the
+    // guess about the specimen. Written into `pending` rather than done here, so
+    // that every mutation of the reconstruction happens in the frame loop and
+    // this cell needs no dependency on it.
+    const resetButton = (() => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "em-toggle";
+      ensureStyles(button);
+      const label = document.createElement("span");
+      label.textContent = "↺ reset";
+      button.appendChild(label);
+      button.addEventListener("click", () => { pending.reset = true; });
+      return button;
+    })()
+  </script>
+  <script id="41" type="text/x-typescript">
+    // Three columns, three rows: what is being measured and how finely, then the
+    // imaging conditions, then how it is being solved — with the bar or button
+    // each row drives in the third column.
+    //
+    // Element references only — the two controls whose values follow the
+    // specimen arrive through hosts — so this is built once and never rebuilt
+    // under a gesture.
+    const controlPanel = (() => {
+      const node = gridControls(document.createElement("div"), {columns: 3, compact: true});
+      node.style.gridTemplateColumns = "repeat(3, minmax(0, 1fr))";
+      node.style.rowGap = "6px";
+
+      const place = (child, gridRow, gridColumn) => {
+        const cell = document.createElement("div");
+        cell.style.gridRow = String(gridRow);
+        cell.style.gridColumn = gridColumn;
+        cell.style.minWidth = "0";
+        cell.appendChild(child);
+        node.appendChild(cell);
+        return cell;
+      };
+
+      // A bar or a button is one line tall against controls that are two, a
+      // label above an input. Padding the cell by the label's height drops it
+      // alongside the input rather than floating it in the middle of the row.
+      const beside = (child, gridRow) => {
+        const inner = document.createElement("div");
+        inner.style.display = "flex";
+        inner.style.alignItems = "center";
+        inner.style.minHeight = "26px";
+        inner.appendChild(child);
+        place(inner, gridRow, "3").style.paddingTop = "17px";
+      };
+
+      place(specimenInput, 1, "1");
+      place(scanInput, 1, "2");
+      beside(simulationMeter, 1);
+
+      place(defocusHost, 2, "1");
+      place(doseHost, 2, "2");
+      beside(passMeter, 2);
+
+      place(betaInput, 3, "1");
+      place(probeInput, 3, "2");
+      const buttons = row([playButton, resetButton, inspectButton], {gap: 6});
+      buttons.style.alignItems = "center";
+      beside(buttons, 3);
+      return node;
+    })()
+  </script>
+  <script id="42" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="43" type="text/x-typescript">
+    // Fixed height from the start, so that nothing below it moves when the first
+    // points of the curve arrive. Centred for the same reason the diagram above
+    // is: `.em-flow` centres its own grid inside whatever width the page gives
+    // it, so a left-aligned plot of the same width would sit half a gutter to
+    // the left of the panels it belongs under.
+    const errorHost = htl.html`<div
+      style="min-height:130px;display:flex;justify-content:center;"></div>`
+  </script>
+
+  <!-- Layout -->
+  <script id="44" type="text/x-typescript">
+    // Five panel widths across four columns, with three gaps between them.
+    const panelSize = Math.max(64, Math.min(124, Math.floor((width - 3 * 52 - 16) / 5)))
+  </script>
+  <script id="45" type="text/x-typescript">
+    // The cycle, drawn as a cycle.
+    //
+    // The top row runs left to right and the bottom row runs back, so the four
+    // arrows close. The vertical rule marks where real space ends: the two
+    // transforms are the only links that cross it, and the measured pattern sits
+    // outside the loop on the far side because it is data rather than state.
+    const flow = flowDiagram(
+      [
+        {key: "object", label: "potential φ(r)", width: panelSize * 2, height: panelSize * 2,
+         row: 0, column: 0, rowSpan: 2, cursor: "crosshair"},
+        {key: "exit", label: "exit wave ψ = eⁱᵠ·P(r−R)", width: panelSize, height: panelSize,
+         row: 0, column: 1},
+        {key: "modelled", label: "modelled |Ψ|²", width: panelSize, height: panelSize, row: 0, column: 2},
+        {key: "measured", label: "measured I", width: panelSize, height: panelSize, row: 0, column: 3},
+        {key: "delta", label: "gradient Δφ", width: panelSize, height: panelSize, row: 1, column: 1},
+        {key: "correction", label: "ΔΨ = √I ∠Ψ − Ψ", width: panelSize, height: panelSize, row: 1, column: 2}
+      ],
+      [
+        // `anchor: "overlap"` so the two links touching the object meet it at
+        // the height of the panel each one comes from. Centre to centre would
+        // put both on the same point of its edge, with the paths running along
+        // each other to get there.
+        //
+        // Labels have to fit the gap they are written in, which is why the two
+        // long ones are on the arrows with the most room and the rest are the
+        // shortest thing that still names the operation.
+        {from: "object", to: "exit", label: "× P", anchor: "overlap"},
+        {from: "exit", to: "modelled", label: "FFT"},
+        {from: "modelled", to: "correction", route: "v", label: "∠Ψ"},
+        {from: "measured", to: "correction", route: "v", label: "√I", bias: 0.62},
+        {from: "correction", to: "delta", route: "h", label: "inv. FFT"},
+        {from: "delta", to: "object", route: "h", label: "+= β", anchor: "overlap"}
+      ],
+      {gap: 52, divider: {before: "modelled", label: "Fourier space"}}
+    )
+  </script>
+  <script id="46" type="text/x-typescript">
+    const visible = whenVisible(flow.node)
+  </script>
+
+  <!-- Placing the probe by hand -->
+  <script id="47" type="text/x-typescript">
+    // What the reader has asked for, waiting for the next frame to act on it.
+    //
+    // Deliberately a cell with no dependencies. A handler that is re-attached
+    // whenever the reconstruction is rebuilt leaves the previous one on the same
+    // canvas, writing into a state object nothing reads any more, and the
+    // listeners pile up one per parameter change. Keeping the channel constant
+    // means the handlers are attached once, and the frame loop is the only place
+    // that touches the reconstruction.
+    const pending = ({at: null, reset: false})
+  </script>
+  <script id="47b" type="text/x-typescript">
+    // Hovering over the specimen puts the probe at the nearest scan position and
+    // takes one step there.
+    //
+    // Hover rather than drag, which is the opposite of what the companion
+    // aperture-overlap widget wants. There a drag sets a parameter and a stray
+    // hover would change the picture out from under the reader; here every
+    // gesture is a step the algorithm would have taken anyway, and sweeping the
+    // pointer across the specimen to build it up is the demonstration.
+    //
+    // The handler records a fraction of the panel, not a scan position: the
+    // conversion needs the scan grid, and doing it here would make this cell
+    // depend on a control and re-attach the listener every time it changed.
+    //
+    // Ignored while playing, where the order is the algorithm's rather than the
+    // reader's. `pointerdown` is there for touch, which has no hover.
+    const picking = (() => {
+      const canvas = flow.panels.get("object").canvas;
+      const pick = (event) => {
+        if (isRunning()) return;
+        const rect = canvas.getBoundingClientRect();
+        pending.at = {
+          x: (event.clientX - rect.left) / rect.width,
+          y: (event.clientY - rect.top) / rect.height
+        };
+      };
+      canvas.addEventListener("pointermove", pick);
+      canvas.addEventListener("pointerdown", pick);
+      return true;
+    })()
+  </script>
+
+  <!-- The loop -->
+  <script id="48" type="text/x-typescript" pinned="">
+    const frame = (function* () {
+      const panel = (key) => flow.panels.get(key);
+      const size = n * n;
+      const phase = new Float64Array(size);
+      const intensity = new Float64Array(size);
+      const budget = qualityBudget({min: 1, max: 24, slowMs: 14, fastMs: 9});
+      const detectorExtent = n * dk * wavelength * 1e3;   // mrad, corner to corner
+
+      // One scalebar setting per domain, so that every panel puts its bar in the
+      // same corner at the same inset. The diffraction panels need a longer bar
+      // than the default fraction gives: "20 mrad" is a wider word than a
+      // twelfth of a 124-pixel panel, and a centred label on a short bar hangs
+      // off the edge. Asking for about a third of the width fixes it without
+      // moving the bar away from the corner.
+      const detectorBar = {
+        extent: detectorExtent, units: "mrad",
+        length: niceScalebarLength(detectorExtent, 0.35)
+      };
+
+      const preview = complex(size);
+      const centred = complex(size);
+      let linked = false;
+
+      const positionFrom = ({x, y}) => {
+        if (x < 0 || x >= 1 || y < 0 || y >= 1) return null;
+        const scanRow = Math.min(m - 1, Math.round((y * n) / stride));
+        const scanCol = Math.min(m - 1, Math.round((x * n) / stride));
+        return scanRow * m + scanCol;
+      };
+
+      const reset = () => {
+        const r = reconstruction;
+        epieReset(r.state, {probe: startProbe});
+        r.order = scanOrder(m * m, r.random);
+        r.cursor = 0;
+        r.passes = 0;
+        r.visits = 0;
+        r.last = null;
+        r.history.length = 0;
+        r.last = home;
+        r.shown = false;
+        r.inspected = false;
+        // Back to the state the widget loads in, which is paused with the probe
+        // parked in the middle — that is what "reset" is being asked for.
+        if (playButton.value) {
+          playButton.value = false;
+          playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+        }
+        drawError();
+      };
+
+      // Everything one update does, except the update.
+      //
+      // A step size of zero runs the whole forward and backward calculation and
+      // leaves the specimen and the probe exactly where they were, so the four
+      // panels fill in and the loop stays open. That is worth having as its own
+      // mode: once a reconstruction is a few passes in, the question stops being
+      // "what does the next update do" and becomes "what does this position see,
+      // and what would it still like to change", and asking that should not
+      // alter the answer.
+      const inspect = (index) => {
+        const r = reconstruction;
+        epieStep(r.state, run.model.data, index, {beta: 0, probeBeta: 0});
+        r.last = index;
+        r.inspected = true;
+        r.shown = true;
+      };
+
+      const advance = (forced = null) => {
+        const r = reconstruction;
+        const index = forced ?? r.order[r.cursor];
+        const {error} = epieStep(r.state, run.model.data, index, {
+          beta: betaInput.value,
+          probeBeta: probeKnown ? 0 : betaInput.value
+        });
+        r.last = index;
+        r.inspected = false;
+        r.shown = true;
+        r.visits += 1;
+
+        // One point per update, including the ones the reader drives by hand, so
+        // that hovering across the specimen draws its own short curve.
+        //
+        // This is only readable because the visiting order is reshuffled every
+        // pass. The residual at a single position says as much about which
+        // position it is — over the specimen or over vacuum — as about how far
+        // the reconstruction has got, and with a fixed order that spread is
+        // replayed identically every pass, as a sawtooth. Reshuffled, the same
+        // spread is the width of the band, and the band's fall is the
+        // convergence.
+        r.history.push({step: r.visits, error});
+        // Halved once it gets long, rather than grown without limit: a widget
+        // left playing through a lecture would otherwise be rebuilding a path
+        // with a hundred thousand points on it. Dropping every other point keeps
+        // the whole range and the width of the band, and only thins the part
+        // that is already four points to the pixel.
+        if (r.history.length >= 8000) {
+          for (let i = 0, j = 0; i < r.history.length; i += 2, j++) r.history[j] = r.history[i];
+          r.history.length = 4000;
+        }
+
+        if (forced !== null) return;
+        r.cursor += 1;
+        if (r.cursor >= r.order.length) {
+          r.cursor = 0;
+          r.passes += 1;
+          r.order = scanOrder(r.order.length, r.random);
+        }
+      };
+
+      let plotted = -1;
+
+      const drawError = () => {
+        const history = reconstruction.history;
+        plotted = history.length;
+        // Drawn even when there is nothing in it, so the axes are on the page
+        // from the start and nothing below them moves when the first update
+        // lands. Explicit domains, because Plot cannot pick one from no points —
+        // or from a single point, which would give it a degenerate range.
+        const values = history.map((d) => 100 * d.error);
+        const top = values.length ? Math.max(...values) * 1.06 : 8;
+        const bottom = values.length ? Math.min(...values) * 0.94 : 0;
+        errorHost.replaceChildren(Plot.plot({
+          // Exactly the diagram's own width: five panel widths and the three
+          // gaps between the four columns. Centred by the host, so its right
+          // edge lands on the right edge of the measured pattern above it.
+          width: Math.min(width, panelSize * 5 + 3 * 52),
+          height: 130,
+          marginLeft: 56,
+          marginBottom: 30,
+          marginTop: 8,
+          // Enough for the last tick's label, which is centred on the tick and
+          // would otherwise be cut in half by the edge of the plot.
+          marginRight: 12,
+          style: {fontSize: "10px"},
+          x: {
+            // From one, because the first update is update one. The axis starts
+            // out a pass wide, so that the first hovered updates are drawn at a
+            // scale that does not change under them, and grows from there.
+            // The last point's own step, not how many points are stored: once
+            // the curve has been halved the two are no longer the same number,
+            // and using the count would clip the newest half of the run.
+            label: "ePIE updates", tickFormat: (d) => d.toFixed(0),
+            domain: [1, Math.max(m * m, history.length ? history[history.length - 1].step : 0)]
+          },
+          y: {
+            // As a percentage of the measured amplitude, which is what the
+            // residual is a fraction of.
+            //
+            // Few ticks. Per update this is a band rather than a curve — the
+            // spread across scan positions is wider than the fall across a pass
+            // — so the axis is there to say roughly where the band sits, and a
+            // dense ladder of gridlines through it only makes it harder to see.
+            // Three and not two: the count is a target that d3 rounds to a nice
+            // step, and over a band a decade and a half wide asking for two
+            // leaves one round number inside the domain and so one label.
+            //
+            // Linear, and not because a convergence curve would not normally be
+            // logarithmic: a log axis over less than a decade, which is where
+            // this spends most of its time, puts in minor ticks without labels.
+            label: "amplitude residual (%)", grid: true, labelAnchor: "center",
+            domain: [bottom, top], ticks: 3,
+            tickFormat: (d) => (d >= 10 ? d.toFixed(0) : d.toFixed(1))
+          },
+          marks: [
+            Plot.line(history, {
+              x: "step", y: (d) => 100 * d.error, stroke: SERIES[0],
+              // Thin, because at a few thousand updates the line is four points
+              // to the pixel and reads as a band.
+              strokeWidth: history.length > 200 ? 0.7 : 1.6
+            }),
+            // Only while there are few enough to tell apart, which is what
+            // hovering one position at a time produces.
+            history.length <= 40
+              ? Plot.dot(history, {x: "step", y: (d) => 100 * d.error, fill: SERIES[0], r: 2})
+              : null
+          ]
+        }));
+      };
+
+      // A diffraction pattern spans four or five decades, and its brightest
+      // pixels are all inside the bright-field disc. A percentile stretch
+      // therefore gives a white disc on black and throws away the scattering,
+      // which is the part that carries the specimen. Scale to the peak and take
+      // the log against a fixed floor instead, so the panel keeps the same
+      // meaning from frame to frame.
+      //
+      // Three decades and not more. Scattering from a structured specimen is
+      // speckle — pixel-to-pixel by nature, in the model as much as in the
+      // measurement — and stretched over four or five decades it reads as noise
+      // on both panels, which hides the one difference that is noise: the
+      // measured pattern's shot noise against the modelled pattern's lack of it.
+      const DECADES = 1e3;
+      const logMap = (source, out) => {
+        let peak = 0;
+        for (let i = 0; i < size; i++) if (source[i] > peak) peak = source[i];
+        const scale = peak > 0 ? DECADES / peak : 0;
+        for (let i = 0; i < size; i++) out[i] = Math.log1p(scale * source[i]);
+        return out;
+      };
+      const logCeiling = Math.log1p(DECADES);
+
+      // Symmetric about zero, with the limit taken just inside the extremes.
+      //
+      // For the gradient panel, where the sign is the content — this position
+      // wants the specimen thicker here and thinner there — so zero has to land
+      // in the middle of the diverging map. A percentile stretch would put it
+      // wherever the data happened to be centred, and would also stretch nothing
+      // but rounding error over the nine tenths of the frame the probe does not
+      // reach.
+      const scratch = new Float64Array(size);
+      const symmetricLimit = (array, quantile = 0.995) => {
+        for (let i = 0; i < size; i++) scratch[i] = Math.abs(array[i]);
+        scratch.sort();
+        return Math.max(scratch[Math.round((size - 1) * quantile)], 1e-6);
+      };
+
+      // Mid grey: a panel nothing has been computed into should read as empty
+      // rather than as a result. The widget opens on six of them, because
+      // nothing has happened until the reader hovers the specimen or presses
+      // play — which is how the algorithm is best introduced, one position at a
+      // time before the scan runs away with it.
+      const blank = (key, side) =>
+        blit(panel(key).canvas,
+          applyColormap(new Float64Array(size), {colormap: "gray", vmin: -1, vmax: 1}),
+          n, n, {size: side});
+
+      const conditions =
+        `${SPECIMENS[specimen].label} · α = ${semiangle.toFixed(1)} mrad` +
+        ` · probe ${(probeWidth * sampling[0]).toFixed(1)} Å,` +
+        ` ${(100 * overlap).toFixed(0)}% overlap at ${(stride * sampling[0]).toFixed(2)} Å` +
+        ` · ${electronsPerPattern}`;
+
+      // The probe drawn where it stands, on whichever panel is showing the
+      // specimen's field of view.
+      const markProbe = (ctx, position) => {
+        const scale = ctx.canvas.width / n;
+        const cy = (((position / m) | 0) * stride + 0.5) * scale;
+        const cx = ((position % m) * stride + 0.5) * scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, (probeWidth / 2) * scale, 0, 2 * Math.PI);
+        // Drawn twice, dark under light. The theme's own text colour is no use
+        // here: this circle sits on an image, not on the page, and a potential
+        // is mostly black with bright columns in it — so a single stroke of any
+        // one colour disappears somewhere along its own circumference.
+        ctx.lineWidth = Math.max(2, scale * 0.7);
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.stroke();
+        ctx.lineWidth = Math.max(1, scale * 0.3);
+        ctx.setLineDash([scale, scale]);
+        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const drawDetector = (key, source) => {
+        for (let i = 0; i < size; i++) intensity[i] = source(i);
+        drawScalebar(
+          blit(panel(key).canvas,
+            applyColormap(fftshift(logMap(intensity, intensity), n, n),
+              {colormap: "magma", vmin: 0, vmax: logCeiling}),
+            n, n, {size: panelSize}),
+          detectorBar
+        );
+      };
+
+      const measuredAt = (position) => {
+        const base = position * size;
+        return (i) => run.model.data[base + i] * run.model.data[base + i];
+      };
+
+      const draw = () => {
+        const r = reconstruction;
+        const stages = r.state.stages;
+
+        // The specimen, with the probe drawn where it last stood. A percentile
+        // stretch is right here and not for the gradient below: the potential is
+        // one-signed and mostly vacuum, so clipping the tails is what gives the
+        // structure the rest of the range. Until an update has been applied
+        // there is nothing to stretch, so it is drawn flat instead.
+        let image;
+        if (r.visits > 0) {
+          reconstructedPhase(r.state, phase);
+          image = applyColormap(histogramScaling(phase), {colormap: "gray"});
+        } else {
+          image = applyColormap(new Float64Array(size), {colormap: "gray", vmin: -1, vmax: 1});
+        }
+        const ctx = blit(panel("object").canvas, image, n, n, {size: panelSize * 2});
+        markProbe(ctx, r.last);
+        drawScalebar(ctx, {extent});
+
+        if (!r.shown) {
+          // Nothing has been computed, so the modelled pattern, the correction
+          // and the gradient are empty — but the probe and the data are not
+          // results, they are what the reader starts with. Showing them parked
+          // at the middle of the field of view gives the opening state something
+          // to read, and says what a scan position is before one has been taken.
+          for (const key of ["modelled", "delta", "correction"]) blank(key, panelSize);
+
+          if (run.ready) {
+            // With a vacuum object the exit wave is the bare probe, so this is
+            // the probe, drawn without having to run a step to get it.
+            const row = ((r.last / m) | 0) * stride;
+            const col = (r.last % m) * stride;
+            for (let ix = 0; ix < n; ix++) {
+              const sx = (((ix - row) % n) + n) % n;
+              for (let iy = 0; iy < n; iy++) {
+                const sy = (((iy - col) % n) + n) % n;
+                preview.re[ix * n + iy] = probeReal.re[sx * n + sy];
+                preview.im[ix * n + iy] = probeReal.im[sx * n + sy];
+              }
+            }
+            drawScalebar(
+              blit(panel("exit").canvas, complexToRGB(preview), n, n, {size: panelSize}),
+              {extent}
+            );
+            drawDetector("measured", measuredAt(r.last));
+          } else {
+            blank("exit", panelSize);
+            blank("measured", panelSize);
+          }
+
+          simulationMeter.set(run.model.progress,
+            run.ready ? `${m}×${m} scan ready` : `scanning ${m}×${m}`);
+          passMeter.set(0, "no updates yet");
+          readout.textContent = run.ready
+            ? `${conditions} · hover the specimen to take a step`
+            : `${conditions} · simulating the experiment`;
+          return;
+        }
+
+        drawScalebar(
+          blit(panel("exit").canvas, complexToRGB(stages.exit), n, n, {size: panelSize}),
+          {extent}
+        );
+
+        drawDetector("modelled", (i) =>
+          stages.modelled.re[i] * stages.modelled.re[i]
+            + stages.modelled.im[i] * stages.modelled.im[i]);
+        drawDetector("measured", measuredAt(r.last));
+
+        // Centred for the panel only.
+        //
+        // The exit wave is built on the whole grid with the probe rolled to the
+        // scan position, so its transform — and the correction's with it —
+        // carries `exp(-2 pi i k . R)`. That is right, and it is what puts the
+        // gradient back in the right place when it comes home. It is also a
+        // rainbow that turns over once per pixel of displacement, and at a
+        // corner of the field it hides everything underneath. A ptychography
+        // code never shows it, because it crops the object around the probe and
+        // so works with an exit wave already at the origin; this is that view,
+        // taken on the way to the canvas and changing nothing the reconstruction
+        // does.
+        drawScalebar(
+          blit(panel("correction").canvas,
+            complexToRGB(fftshiftComplex(
+              centreSpectrum(stages.correction, n,
+                ((r.last / m) | 0) * stride, (r.last % m) * stride, centred),
+              n, n)),
+            n, n, {size: panelSize}),
+          detectorBar
+        );
+        // Real, because the object is a potential — so a diverging colormap
+        // about zero rather than domain colouring, and the panel says directly
+        // where this position wants the specimen thicker and where thinner.
+        // Symmetric limits, so that zero is the middle of the map.
+        const limit = symmetricLimit(stages.gradient);
+        drawScalebar(
+          blit(panel("delta").canvas,
+            applyColormap(stages.gradient, {colormap: "PuOr", vmin: -limit, vmax: limit}),
+            n, n, {size: panelSize}),
+          // Dark, because PuOr is pale in the middle and a white bar vanishes
+          // into it in either theme.
+          {extent, color: "#1a1a1a"}
+        );
+
+        simulationMeter.set(1, `${m}×${m} scan`);
+        passMeter.set(r.cursor / r.order.length, `pass ${r.passes + 1}`);
+
+        readout.textContent =
+          `${conditions} · ${r.visits} update${r.visits === 1 ? "" : "s"}` +
+          ` · residual ${(100 * r.state.error).toFixed(1)}% here` +
+          (r.inspected ? ", inspecting — nothing applied" : "");
+
+        // The one place in the diagram that says the loop is open. Only on a
+        // change: the label lives in the arrow layer, and setting it redraws
+        // every arrow.
+        if (r.inspected !== linked) {
+          linked = r.inspected;
+          flow.setLinkLabel("delta", "object", linked ? "held" : "+= β");
+        }
+
+        // Rebuilding the plot is the most expensive thing on the frame once the
+        // curve is a few thousand points long, so it is batched while playing
+        // and immediate when the reader is driving one update at a time.
+        const behind = r.history.length - plotted;
+        const batch = Math.max(8, r.history.length >> 7);
+        if (behind !== 0 && (behind >= batch || !isRunning())) drawError();
+      };
+
+      // Empty axes, drawn before the first frame. The host outlives this cell,
+      // so without this a rebuilt reconstruction would leave the previous one's
+      // curve on screen until a whole new pass had landed — and on a first load
+      // there would be a blank gap where the plot is about to appear.
+      drawError();
+
+      for (const tick of frames({fps: 30, playing: visible})) {
+        const started = performance.now();
+
+        if (pending.reset) {
+          pending.reset = false;
+          pending.at = null;
+          reset();
+        }
+
+        if (!run.ready) {
+          if (run.model.step(Math.max(1, budget.value)) === 0) run.ready = true;
+        } else if (isRunning()) {
+          const steps = Math.max(1, budget.value);
+          for (let s = 0; s < steps; s++) advance();
+        } else if (pending.at) {
+          // One step per scan position, not one per frame.
+          //
+          // The pointer goes on firing while it sits still, and inside one scan
+          // cell it names the same position every time. Stepping on each of
+          // those hammers that position: after the first the residual there is
+          // already small, so the reader watches the gradient collapse to
+          // nothing while the potential under the pointer saturates. Taking a
+          // step only when the position changes makes a sweep across the
+          // specimen do exactly what it looks like it does.
+          const position = positionFrom(pending.at);
+          const inspecting = inspectButton.value;
+          // The mode counts as a change too: switching to inspect without moving
+          // the pointer should still fill the panels in, and switching back
+          // should still apply the update the reader has been looking at.
+          const moved = position !== reconstruction.last
+            || inspecting !== reconstruction.inspected
+            || !reconstruction.shown;
+          if (position != null && moved) {
+            if (inspecting) inspect(position);
+            else advance(position);
+          }
+        }
+
+        budget.report(performance.now() - started);
+        draw();
+        yield tick;
+      }
+    })()
+  </script>
+</notebook>

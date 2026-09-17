@@ -532,6 +532,35 @@
       const budget = qualityBudget({min: 1, max: 96, slowMs: 14, fastMs: 9});
       const box = 4 * radiusPixels;
 
+      // How fast playback walks the bright-field disc, paced against the clock
+      // rather than counted per frame.
+      //
+      // Simulating the experiment is work to get through and takes whatever the
+      // frame will carry. The walk is the thing the reader is here to watch, and
+      // at the same budget it was over in two thirds of a second — 2600 pixels
+      // a second, measured, which is a number about this machine's refresh rate
+      // and nothing about the physics. Per-frame counts cannot fix that: the
+      // `fps` argument to `frames` throttles the value it yields, but the loop
+      // body still runs once per runtime tick, so halving the count per frame
+      // just lets the frame rate rise to meet it. Spending a fixed number of
+      // seconds on the sweep makes it the same speed on any display.
+      //
+      // Only while playing. A click in the disc is direct manipulation and
+      // should land at once, not two and a half seconds later.
+      const SWEEP_SECONDS = 2.5;
+      let owed = 0;
+      let pacedAt = performance.now();
+      const paced = () => {
+        const now = performance.now();
+        owed += ((now - pacedAt) / 1000) * (bfIndices.length / SWEEP_SECONDS);
+        pacedAt = now;
+        // Never more than the frame can carry, and never a backlog: a tab that
+        // has been in the background should resume, not catch up in one lurch.
+        const take = Math.min(Math.floor(owed), Math.max(1, budget.value));
+        owed = Math.min(owed - take, 1);
+        return take;
+      };
+
       const contextFor = (kIndex) => ({
         kRow: ((kIndex / n) | 0) < n / 2 ? (kIndex / n) | 0 : ((kIndex / n) | 0) - n,
         kCol: kIndex % n < n / 2 ? kIndex % n : (kIndex % n) - n,
@@ -653,9 +682,11 @@
           // Computed here rather than stored: writing "everything" into `limit`
           // while playing leaves it there, and the next scan then runs itself to
           // completion even though playback was reset to stopped.
-          const target = isRunning() ? bfIndices.length : accumulation.limit;
+          const running = isRunning();
+          const target = running ? bfIndices.length : accumulation.limit;
           if (accumulation.next < target) {
-            const stop = Math.min(target, accumulation.next + Math.max(1, budget.value));
+            const take = running ? paced() : Math.max(1, budget.value);
+            const stop = Math.min(target, accumulation.next + take);
             for (; accumulation.next < stop; accumulation.next++) {
               const kIndex = bfIndices[accumulation.next];
               overlapFunction(probe, n, Q, kIndex, gammaBuffer);

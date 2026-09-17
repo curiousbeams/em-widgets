@@ -42,3 +42,4 @@ export * from "./nonparaxial.js";
 export * from "./projections.js";
 export * from "./ptycho.js";
 export * from "./ptycho-sim.js";
+export * from "./epie.js";

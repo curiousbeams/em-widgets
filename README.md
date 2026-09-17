@@ -18,7 +18,7 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Thirteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+Fourteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
 `aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
 against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
@@ -30,7 +30,9 @@ which drives an SEM or a S/TEM column from one table of components,
 phase retrieval, `aperture-overlap`, which draws both slices of the aperture
 overlap function every direct phase-retrieval method is built on, and
 `direct-ptychography`, which runs SSB, OBF, parallax and iCOM through one
-pipeline where only the kernel changes.
+pipeline where only the kernel changes, and `iterative-ptychography`, which
+draws ePIE as the closed loop it is and lets you take one scan position at a
+time.
 
 ## Adding a widget to a page
 
@@ -141,6 +143,94 @@ several pages with different defaults, via `main.redefine(name, value)`.
   resizes it — `▶` and `⏸` do not even share a line height, since they come
   from different fonts — and a play button that grows by two pixels nudges
   every panel below it down the page.
+- **A four-dimensional dataset has to be laid out for whichever axis the
+  algorithm walks.** The direct methods read one detector pixel's virtual image
+  across the whole scan, so `[k][R]` puts what they need in one contiguous run;
+  ePIE reads one scan position's whole pattern, so it wants `[R][k]`. The
+  numbers are the same either way and the wrong one turns every read into a
+  cache miss, so `forwardModel` takes a `layout` rather than picking one.
+- **Match the stretch to what the array holds.** `image.histogramScaling` is the
+  right default for a one-signed picture with content in most of it — a
+  projected potential, say, where clipping the tails is what gives the structure
+  the rest of the range. A signed field wants limits symmetric about zero
+  instead, from a high percentile of the magnitude, so that zero stays the middle
+  of the diverging map rather than landing wherever the data happened to be
+  centred. And an array holding nothing yet wants neither: a percentile stretch
+  of an all-zero array is a stretch of rounding error, so
+  `iterative-ptychography` paints a flat grey and says in the readout that it is
+  waiting. All three appear in that one widget.
+- **A dose is per unit area of specimen, so the same number is a different
+  camera.** Electrons per diffraction pattern are the dose times the area one
+  scan position covers, and the three specimens in the ptychography widgets
+  differ by sixty in that area — one dose figure would be four electrons per
+  detector pixel for strontium titanate and thirty thousand for apoferritin.
+  Give each specimen its own range, and report the per-pattern count next to the
+  dose so the reader can see which of the two they are actually setting.
+- **A shifted wave's spectrum carries a phase ramp, and domain colouring shows
+  it.** An exit wave built on the whole grid with the probe rolled to the scan
+  position transforms to something multiplied by `exp(-2 pi i k . R)` — correct,
+  and what brings the correction home to the right place, but also a rainbow that
+  turns over once per pixel of displacement. A ptychography code never sees it,
+  because it crops the object around the probe. `epie.centreSpectrum` multiplies
+  the ramp back out on the way to the canvas, which is the same picture that crop
+  would give; the sign is the only thing that can go wrong, and the test pins it
+  by rolling a probe and asserting the centred transform matches the unrolled
+  one to 1e-16.
+- **`frames({fps})` throttles the value it yields, not the loop body.** The
+  runtime calls a generator cell once per animation frame either way, so a cell
+  that does its work unconditionally runs at the display's refresh rate whatever
+  `fps` says — it only matters to a cell that keys its animation off the yielded
+  index. The consequence is that per-frame work counts do not set a speed:
+  halving the count per frame just lets the frame rate rise to meet it (measured
+  in `direct-ptychography`: 96 pixels a frame ran at 27 fps, 24 a frame ran at
+  53). When a rate is what you want, pace against the clock — spend a stated
+  number of seconds on the sweep and take `elapsed * rate` each frame, capped by
+  the quality budget so a slow machine degrades instead of lurching. Leave direct
+  manipulation at full speed: a click should land at once.
+- **A step size of zero is an inspect mode for free.** `epieStep` at `beta: 0`
+  runs the whole forward and backward calculation, fills in every intermediate
+  stage, and leaves the reconstruction bit-for-bit where it was — so a widget can
+  offer "show me what this position sees" without a second code path and without
+  the reader changing the answer by asking. `iterative-ptychography` puts it on a
+  toggle beside play, and relabels the arrow back into the specimen to say the
+  loop is open.
+- **A hover that does something must act on the state changing, not on the
+  event.** `pointermove` keeps firing while the pointer sits still, so a handler
+  that takes a step per event — or per frame — hammers whatever is under the
+  cursor. In `iterative-ptychography` that meant the reconstruction overfitting
+  one scan position until its gradient collapsed, which looks like a bug in the
+  gradient. Record where the pointer is, convert that to a position in the frame
+  loop, and act only when it differs from the last one.
+- **A cell that attaches an event listener must not depend on anything that
+  changes.** Observable re-runs the cell and the old listener stays on the
+  element, so they accumulate one per parameter change, each writing into a state
+  object nothing reads any more. Keep the handler's dependencies to the element
+  it is bound to and a constant channel — `iterative-ptychography` has a
+  dependency-free `pending` cell that both the hover and the reset button write
+  into, and the frame loop is the only thing that acts on it.
+- **A thrown exception inside an animation generator is silent.** A cell that
+  yields frames swallows the error: no error block, no `pageerror`, nothing in
+  the console — the panels simply stop being drawn while everything around them
+  looks healthy. `_build/pw/run.mjs` catches it anyway, because a widget whose
+  loop never ran has an empty `.em-badge` and canvases still at their CSS size.
+- **Reshuffle the visiting order, then the per-position error curve is worth
+  plotting.** How well one position fits says as much about which position it is
+  — over the specimen or over vacuum — as about how far the reconstruction has
+  got. With a fixed order that spread is replayed identically on every pass, so
+  the curve is a sawtooth whose period is exactly one pass and which says nothing
+  about convergence. Reshuffled, the same spread becomes the width of a band and
+  the band's fall is the convergence, which is more informative than the per-pass
+  mean that hides it. Plot it thin, drop the dots past a couple of hundred
+  points, and halve the stored series when it gets long — otherwise a widget left
+  playing through a lecture ends up rebuilding a path with a hundred thousand
+  points on it. Halving also decouples the point count from the step number, so
+  the axis domain has to come from the last point's own x.
+- **An arrow into a panel that spans several rows needs to know which row it
+  came from.** `ui.flowDiagram` joins panels centre to centre, which is right
+  until a tall panel has more than one link: they then meet it at the same point
+  and the two paths run along each other to get there. `anchor: "overlap"` on a
+  link meets each panel at the middle of the span the two share, which is what
+  closes the loop in `iterative-ptychography`.
 - **Do not name a cell `view`.** It is an Observable builtin, and a cell
   declaring it does not shadow the builtin for other cells. They keep seeing the
   standard library's function, so `view.tilt` reads `undefined` and the failure
@@ -174,7 +264,8 @@ duplicated across the lab's Python notebooks.
 | `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `currentColor`, `pointerToIndices` |
 | `projections.js` | `generalisedProjection`, `productProjection`, `namedParameters` (AP/DM/RRR/RAAR), `line`, `polarCurve`, `iteration`, `residual` |
 | `ptycho.js` | `overlapFunction` and `overlapFunctionAtQ` (the two slices of Γ), `overlapRegions`, `overlapSums`, `parallaxShifts`, `tileSpectrum`, `directAccumulator`/`accumulatePixel`/`directImage`, `directCTF`, `directSSNR` |
-| `ptycho-sim.js` | `measurePosition`, `forwardModel` (resumable, bright-field subset only), `scanSpectra` |
+| `ptycho-sim.js` | `measurePosition`, `forwardModel` (resumable; a detector subset and either data layout), `scanSpectra` |
+| `epie.js` | `epieState` (complex or potential object, with positivity), `epieStep` (one position, object and probe), `epieReset`, `reconstructedPhase`, `scanOrder`, `probeDiameter`, `centreSpectrum` |
 | `raytrace.js` | `transferMatrix`, `traceRays`, `traceParallel`, `traceFrom`, `COLUMNS`/`buildColumn`, `reverseColumn`, `findCrossovers`/`findPlanes`, `pairedSeparationAt` |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |
 
@@ -239,6 +330,29 @@ own Python (numpy, py4DSTEM, colorspacious):
   — the end-to-end convention test. It pins the fftfreq ordering, the sign of
   chi (`exp(-i chi)`, and the wrong sign is checked to *fail*), the `ifft2`
   normalisation and the `fftshift`. Note abtem's `defocus` is `-C10`.
+
+The ptychography modules check each other rather than a fixture, because the
+closed forms are exact:
+
+- `Γ(q, k=0)` is the HRTEM transfer function `-2i ψ(0) A(q) sin χ(q)` to 4e-19,
+  which pins the sign of `chi`, the probe conjugation, the `k±q` index order and
+  the fftfreq wraparound at once.
+- the simulated data satisfies `G(q,k) = i Γ(q,k) φ̂(q)` to 1.5e-5 at an object
+  amplitude of 1e-4, and the residual falls linearly with the object strength —
+  so it is the weak-phase truncation and nothing else. This is the only test
+  that ties the forward model to the inversion.
+- ePIE run on that same forward model recovers a known weak phase object to
+  0.01% of its own rms, its residual falls on every pass, and refining a probe
+  started at the wrong defocus fits the data fifty times better than holding it
+  there.
+- solving for the potential rather than the complex object gives the same answer,
+  and adding positivity brings the free additive constant down from 94% of the
+  object's own rms to 20% — the measurement fixes `exp(i phi)` and so leaves
+  `phi` floating, and the constraint is what pins it.
+- a known probe comes out of 2560 steps bit for bit unchanged, a step size of
+  zero fills every stage while leaving object and probe bit for bit unchanged,
+  and a reset returns a run that has been refining both to exactly the state it
+  started in.
 
 `electronWavelength` differs from abtem by 1.3e-7 relative, because the kit uses
 the lab's Python constants and abtem uses CODATA. The kit deliberately tracks the
