@@ -110,3 +110,19 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
   notebook: "/notebooks/projection-sets.html"
 }
 :::
+
+## Research overview
+
+The landing-page row. `cells` keeps the three cards and drops the prose above
+them, and `params` points the links at wherever the research page actually
+lives — here, nowhere in particular.
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/research-overview.html",
+  cells: ["overviewView"],
+  params: {
+    links: {methods: "#", optics: "#", imaging: "#"}
+  }
+}
+:::

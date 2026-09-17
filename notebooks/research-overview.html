@@ -1,0 +1,1007 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Research overview</title>
+  <script id="1" type="text/markdown">
+    # Three directions, three thumbnails
+  </script>
+  <script id="2" type="text/markdown">
+    A landing-page row: one square for each of the lab's research directions,
+    each of them the smallest honest version of a widget that appears in full on
+    the research page it links to. Nothing here is precomputed and nothing here
+    has a control — the panels run on their own, and **hovering** one hands it
+    over to you.
+
+    **Method development** runs ePIE on apoferritin, one scan position at a time,
+    and starts again when it has converged. Hover it and the scan stops: the
+    probe follows the pointer and the panel shows what that one position wants to
+    change about the specimen, without changing it.
+
+    **Instrumentation** traces a cone of electrons through a magnetic (Glaser)
+    lens with the third-order equations of motion, turning slowly about the optic
+    axis. Hover it and the lens strength sweeps up and back, and the crossover
+    walks along the axis.
+
+    **Functional imaging** scans a focused beam across Si(111). Where the
+    surface has reconstructed into the dimer-adatom-stacking-fault cell, its
+    seven-fold period puts six extra spots between every pair of substrate spots;
+    where it is still bulk-terminated, those spots are not there. So the map of
+    how much intensity sits in them is an image of where the surface has
+    reconstructed. Hover it to drive the beam by hand.
+
+    The reconstruction is the real one, built by `tools/si111-7x7.py` in the four
+    steps it is usually explained in — corner hole, dimers, stacking fault,
+    adatoms — and the pattern is a kinematical transform of the atoms the beam
+    stands on, weighted by how deep they lie, because an electron that comes back
+    out carries the first few Angstroms and not what is under them.
+
+    The number the map holds, at each position: transform the patch the beam
+    lights up, add up the intensity in the fractional spots and in the six
+    first-order substrate spots, and take the first as a share of the total. Each
+    spot is a small disk with the average of the annulus around it subtracted,
+    which matters because a boundary scatters diffusely into every spot position
+    at once — counted raw, a beam sitting on an island edge reads as *more*
+    ordered than one in the middle of it. The spots nearest the direct beam are
+    left out for the same kind of reason: however sharply a focused beam is
+    defined, its transform has a skirt, and close in that skirt is brighter than
+    anything the surface does.
+
+    So the map runs from nothing on bulk-terminated ground to most of the counted
+    intensity on a reconstructed island, and the islands come out soft-edged
+    because the beam is about two cells across. It cannot be made much smaller:
+    squeeze it further and its own spots spread wider than the gap between the
+    sevenths, and the reconstruction stops being readable however finely the scan
+    is stepped.
+  </script>
+
+  <script id="3" type="text/x-typescript">
+    const overviewView = display(overview.node);
+  </script>
+
+  <script id="4" type="text/x-typescript">
+    import {
+      electronWavelength, complexProbe, ifft2, complex, fftshift,
+      angularSpatialFrequencies, mulberry32, histogramScaling, cropCenter,
+      applyColormap, blit, makeCanvas, drawScalebar, niceScalebarLength,
+      currentColor, withAlpha, ensureStyles,
+      frames, whenVisible, hoverTracker, qualityBudget,
+      forwardModel, epieState, epieStep, epieReset, reconstructedPhase,
+      scanOrder, probeDiameter,
+      glaserField, memoiseDerivatives, equationsOfMotion, traceRay3D, coneOfRays,
+      makeView, project,
+      reciprocalVectors, latticeOrigins, splatAtoms, illuminatedPattern,
+      superstructureSpots, spotSum,
+      UI, SERIES
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="4b" type="text/x-typescript">
+    import {resolveAsset} from "https://curiousbeams.github.io/em-widgets/kit/data.js"
+  </script>
+
+  <!-- What the cards say and where they go. Both are redefinable from the
+       markdown call site with `params`, because the path to the research page
+       is the host site's business, not this notebook's. -->
+  <script id="5" type="text/x-typescript">
+    const links = ({
+      methods: "/research#em-method-development",
+      optics: "/research#electron-optics-instrumentation",
+      imaging: "/research#functional-imaging-of-materials"
+    })
+  </script>
+  <script id="6" type="text/x-typescript">
+    // Two lines each, so the three captions occupy the same height whatever the
+    // card width — a one-line caption beside two-line ones drags its panel out
+    // of the row.
+    const titles = ({
+      methods: ["Electron Microscopy", "Method Development"],
+      optics: ["Electron Optics", "Instrumentation"],
+      imaging: ["Functional Imaging", "of Materials and Surfaces"]
+    })
+  </script>
+  <script id="7" type="text/x-typescript">
+    // Three across when there is room for three readable squares, one down when
+    // there is not. Two across would leave a third card alone on a line.
+    const side = (() => {
+      const gap = 14;
+      // 8px of padding each side of the card, the card's own 1px border, and
+      // the 1px the kit's stylesheet puts around every canvas. Measured, not
+      // guessed: the last of those is easy to forget and costs a whole row.
+      const chrome = 20;
+      const three = Math.floor((width - 2 * gap - 3 * chrome) / 3);
+      return three >= 150 ? Math.min(three, 260) : Math.min(width - chrome, 260);
+    })()
+  </script>
+
+  <script id="8" type="text/x-typescript">
+    // Built from `width` and nothing else. No control in this notebook, so the
+    // usual trap — a DOM cell that depends on a live input value and re-parents
+    // a slider mid-drag — cannot bite; but the frame loop below depends on these
+    // canvases, so it is rebuilt with them, and everything it accumulates lives
+    // in cells of its own so a resize does not restart the reconstruction.
+    const overview = (() => {
+      const style = htl.html`<style>
+        .em-overview { display: flex; flex-wrap: wrap; gap: 14px;
+          justify-content: center; align-items: flex-start; margin: 4px 0 8px; }
+        .em-overview--card { display: flex; flex-direction: column; align-items: center;
+          gap: 8px; padding: 8px; border-radius: 10px; text-decoration: none;
+          color: inherit; border: 1px solid var(--theme-foreground-faintest, rgba(128,128,128,0.25));
+          transition: border-color 140ms ease, box-shadow 140ms ease; }
+        .em-overview--card:hover, .em-overview--card:focus-visible {
+          border-color: ${UI.accent}; box-shadow: 0 0 0 2px ${withAlpha(UI.accent, 0.18)};
+          outline: none; }
+        .em-overview--card canvas { display: block; border-radius: 6px; }
+        .em-overview--title { font-size: 12.5px; line-height: 1.32; text-align: center;
+          font-weight: 600; letter-spacing: 0.01em; }
+        .em-overview--title span { display: block; font-weight: 400;
+          color: var(--theme-foreground-muted, inherit); }
+      </style>`;
+
+      const card = (key) => {
+        const canvas = makeCanvas(side, side);
+        const node = htl.html`<a class="em-overview--card" href=${links[key]}
+          aria-label=${titles[key].join(" ")}>${canvas.canvas}
+          <div class="em-overview--title">${titles[key][0]}<span>${titles[key][1]}</span></div>
+        </a>`;
+        return {...canvas, node, hover: hoverTracker(node), at: null};
+      };
+
+      const cards = {methods: card("methods"), optics: card("optics"), imaging: card("imaging")};
+
+      // Where the pointer is, as a fraction of the panel, recorded on move and
+      // acted on in the frame loop. Acting on the event itself would run a step
+      // every time `pointermove` fires, which it keeps doing while the pointer
+      // sits still.
+      for (const key of ["methods", "imaging"]) {
+        const {canvas} = cards[key];
+        const pick = (event) => {
+          const rect = canvas.getBoundingClientRect();
+          cards[key].at = {
+            x: (event.clientX - rect.left) / rect.width,
+            y: (event.clientY - rect.top) / rect.height
+          };
+        };
+        canvas.addEventListener("pointermove", pick);
+        canvas.addEventListener("pointerdown", pick);   // touch has no hover
+      }
+
+      const node = htl.html`<div class="em-overview">${style}
+        ${Object.values(cards).map((c) => c.node)}</div>`;
+      ensureStyles(node);
+      invalidation.then(() => {
+        for (const c of Object.values(cards)) c.hover.stop();
+      });
+      return {node, cards};
+    })()
+  </script>
+  <script id="9" type="text/x-typescript">
+    const visible = whenVisible(overview.node)
+  </script>
+  <script id="10" type="text/x-typescript">
+    // A row of panels that move by themselves is exactly what this setting is
+    // about. With it on, each panel completes one pass and then holds, and hover
+    // still does everything it did — the reader asks for the motion instead of
+    // being given it.
+    const reducedMotion = globalThis.matchMedia
+      ? globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false
+  </script>
+
+  <script id="10b" type="text/x-typescript">
+    // One cycle for the row. The reconstruction converges and starts again, the
+    // scan covers the surface once, and the lens turns once, all in the same
+    // time — three panels on their own clocks read as three animations that
+    // happen to sit together.
+    const PERIOD = 24
+  </script>
+  <!-- Panel one: ePIE on apoferritin. Deliberately the same numbers as the full
+       iterative-ptychography widget, at a coarser scan. -->
+  <script id="11" type="text/x-typescript">
+    const epie = ({
+      n: 96,                 // the potential file is 96 x 96
+      m: 12,                 // scan positions per side; stride 8 px
+      extent: 192.0,         // Angstrom
+      energy: 300e3,
+      radiusPixels: 12,      // aperture radius on the detector grid
+      probePixels: 28,       // probe diameter, which sets the defocus
+      dose: 1e4,             // electrons per square Angstrom
+      crop: 48,              // how much of the detector the inset shows
+      beta: 0.9,
+      passes: 8              // before it starts again from vacuum
+    })
+  </script>
+  <script id="12" type="text/x-typescript">
+    const epieRate = (epie.passes * epie.m * epie.m) / PERIOD
+  </script>
+  <script id="11b" type="text/x-typescript">
+    const epieOptics = (() => {
+      const {n, extent, energy, radiusPixels, probePixels} = epie;
+      const wavelength = electronWavelength(energy);
+      const sampling = [extent / n, extent / n];
+      const semiangle = radiusPixels * (1 / extent) * wavelength * 1e3;
+      // The defocus that makes the probe `probePixels` across: a defocused probe
+      // is a shadow image of the aperture, 2 |C10| alpha wide.
+      const C10 = -(probePixels * extent * extent) / (2 * radiusPixels * wavelength * n);
+      const spectrum = complexProbe({
+        gpts: [n, n], sampling, energy, semiangleCutoff: semiangle, aberrations: {C10}
+      });
+      const probe = ifft2(
+        {re: Float64Array.from(spectrum.re), im: Float64Array.from(spectrum.im)}, n, n);
+      return {wavelength, sampling, semiangle, probe, width: probeDiameter(probe, n)};
+    })()
+  </script>
+  <script id="13" type="text/x-typescript">
+    // Phase shift in radians, written as raw little-endian float32: one fetch,
+    // no decoding. Mean subtracted when the file was made, so the floor goes
+    // back to zero here — a projected potential is non-negative, which is what
+    // the reconstruction is allowed to assume.
+    const objectPhase = await (async () => {
+      const url = resolveAsset(
+        "https://curiousbeams.github.io/em-widgets/data/apoF-potential.f32");
+      const buffer = await (await fetch(url)).arrayBuffer();
+      const phase = Float64Array.from(new Float32Array(buffer));
+      let floor = Infinity;
+      for (const value of phase) if (value < floor) floor = value;
+      for (let i = 0; i < phase.length; i++) phase[i] -= floor;
+      return phase;
+    })()
+  </script>
+  <script id="14" type="text/x-typescript">
+    // The experiment, simulated in the browser and chunked across frames so the
+    // page is not blocked while it runs. About 200 ms of work in total.
+    const run = ({
+      model: forwardModel({
+        objectPhase, probeReal: epieOptics.probe, n: epie.n, m: epie.m,
+        dose: epie.dose, sampling: epieOptics.sampling,
+        amplitude: true, layout: "rk", random: mulberry32(1)
+      }),
+      ready: false
+    })
+  </script>
+  <script id="15" type="text/x-typescript">
+    // The reconstruction, kept out of the frame loop so that resizing the widget
+    // — which rebuilds the canvases and so the loop — does not start it over.
+    const reconstruction = (() => {
+      const random = mulberry32(7);
+      return {
+        state: epieState({
+          n: epie.n, m: epie.m, probe: epieOptics.probe,
+          objectType: "potential", positivity: true
+        }),
+        random,
+        order: scanOrder(epie.m * epie.m, random),
+        cursor: 0,
+        passes: 0,
+        visits: 0,
+        last: ((epie.m >> 1) * epie.m) + (epie.m >> 1),
+        inspecting: false,
+        owed: 0
+      };
+    })()
+  </script>
+
+  <!-- Panel two: a cone of electrons through a Glaser lens. -->
+  <script id="16" type="text/x-typescript">
+    const lens = ({
+      a: 0.0075,             // field half-width, metres
+      phi0: 1000,            // accelerating voltage
+      B0: 0.012,             // peak axial field, tesla — where it sits at rest
+      sweep: [0.010, 0.014], // and the range it sweeps on hover. Wider than this
+                             // and the strong end crosses in the first fifth of
+                             // the span, leaving four fifths of divergence.
+      span: {z0: -0.1, z1: 0.07},
+      angle: 20e-3,          // cone half-angle
+      shells: 2,
+      azimuthal: 8,
+      steps: 260,
+      sweepSeconds: 7        // one strength sweep, while hovered
+    })
+  </script>
+  <script id="17" type="text/x-typescript">
+    // Traced on demand rather than from a table: a bundle costs a few
+    // milliseconds, and only the card being hovered ever asks for a new one.
+    const traceBundle = (() => {
+      const cache = new Map();
+      return (B0, steps) => {
+        const key = `${B0.toFixed(5)}:${steps}`;
+        const hit = cache.get(key);
+        if (hit) return hit;
+        const field = memoiseDerivatives(glaserField({a: lens.a, B0, phi0: lens.phi0}));
+        const system = equationsOfMotion({magnetic: field, phi0: lens.phi0, order: 3});
+        const rays = coneOfRays({
+          azimuthal: lens.azimuthal, shells: lens.shells,
+          minAngle: lens.angle / lens.shells, maxAngle: lens.angle
+        }).map((start) => ({
+          ...traceRay3D(system, {...lens.span, steps, ...start}),
+          shell: start.shell
+        }));
+        // Bounded, so a long sweep does not accumulate every bundle it has ever
+        // drawn. The sweep revisits its own values, so the recent ones are the
+        // ones worth keeping.
+        if (cache.size > 48) cache.clear();
+        cache.set(key, rays);
+        return rays;
+      };
+    })()
+  </script>
+  <script id="18" type="text/x-typescript">
+    // The frame the scene is drawn in, fixed once from the widest bundle the
+    // sweep will reach. Rescaling per frame would make the lens appear to zoom
+    // rather than the rays to move.
+    const lensFrame = (() => {
+      // Framed on the cone arriving at the lens, not on the widest ray anywhere
+      // in the span: at the strong end of the sweep the rays cross early and
+      // then fly apart, and framing on those would shrink everything else to a
+      // thread. Over-focused rays leave the panel instead, which is what
+      // over-focusing looks like.
+      const rMax = lens.angle * Math.abs(lens.span.z0) * 1.25;
+      return {rMax, aspect: 1.5};
+    })()
+  </script>
+
+  <!-- Panel three: scanning surface diffraction. -->
+  <script id="19" type="text/x-typescript">
+    const surface = ({
+      n: 460,                // grid points across the field
+      extent: 500,           // Angstrom, so about nineteen 7x7 cells
+      beam: 11,              // Angstrom; see kit/surface.js on how small it may be
+      scan: 52,              // scan positions per side
+      patch: 128,            // grid points transformed at each of them
+      inset: 0.2,            // how far in from the edge the scan stays
+      crop: 96,              // how much of the pattern to show
+      // Where the surface has reconstructed: three islands, a couple of cells
+      // across, on ground that has not. Triangles, because that is the shape a
+      // 7x7 domain takes — its edges follow the substrate's own directions —
+      // and all pointing the same way, because the stacking fault that makes
+      // one half of the cell picks a direction for the whole terrace.
+      //
+      // `x` and `y` are where the island should land on the panel, which is the
+      // scanned window rather than the whole field; the bottom right corner is
+      // left clear because the pattern inset sits there. `cells` is the length of
+      // the island's sides, in whole 7x7 cells — much below two and it is finer
+      // than a beam this size can resolve, and the beam cannot be made much
+      // smaller (see kit/surface.js).
+      // `flip` turns an island the other way up. Both orientations are real:
+      // successive bilayer terraces on Si(111) are rotated by half a turn with
+      // respect to each other, so an island on the next terrace down points the
+      // opposite way to its neighbours on this one.
+      islands: [
+        {x: 0.24, y: 0.24, cells: 4},
+        {x: 0.30, y: 0.70, cells: 5.5},
+        {x: 0.76, y: 0.34, cells: 4, flip: true}
+      ]
+    })
+  </script>
+  <script id="19b" type="text/x-typescript">
+    // The Si(111)-(7x7) cell: the dimer-adatom-stacking-fault reconstruction and
+    // the bulk-terminated bilayer it forms on, built by `tools/si111-7x7.py`.
+    const si111 = await (await fetch(resolveAsset(
+      "https://curiousbeams.github.io/em-widgets/data/si111-7x7.json"))).json()
+  </script>
+  <script id="20" type="text/x-typescript">
+    const surfaceState = (() => {
+      const {n, extent, scan} = surface;
+      const {a1, a2} = si111;
+
+      // A cell is not where its origin is: both vectors of this lattice point
+      // into the same half plane, so its content sits down the diagonal from it.
+      // The two halves of the cell sit at a third and two thirds of that
+      // diagonal, which is what each of them is asked about.
+      const diagonal = [a1[0] + a2[0], a1[1] + a2[1]];
+      const halfCentre = [
+        [diagonal[0] / 3, diagonal[1] / 3],
+        [(2 * diagonal[0]) / 3, (2 * diagonal[1]) / 3]
+      ];
+
+      // Islands are placed where they should land on the panel, which shows the
+      // scanned window rather than the whole field.
+      const toField = (fraction) => extent * (surface.inset + fraction * (1 - 2 * surface.inset));
+      // Equilateral triangles in real space, a third of a turn apart — which puts
+      // all three edges along a lattice direction, since the two cell vectors are
+      // sixty degrees apart. Whole cells either way, so the edges come out
+      // stepped at the cell's own scale rather than straight.
+      const triangles = surface.islands.map((island) => {
+        const cx = toField(island.x);
+        const cy = toField(island.y);
+        const radius = (island.cells * Math.hypot(a1[0], a1[1])) / Math.sqrt(3);
+        // The first axis is drawn downwards, so a vertex at zero degrees points
+        // down the panel: the default has its flat edge along the bottom, and
+        // `flip` — one sixth of a turn — stands it on its head.
+        const turn = island.flip ? 0 : Math.PI / 3;
+        return [0, 1, 2].map((k) => {
+          const angle = turn + (2 * Math.PI * k) / 3;
+          return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+        });
+      });
+      const inside = (vertices, x, y) => {
+        let sign = 0;
+        for (let k = 0; k < 3; k++) {
+          const [ax, ay] = vertices[k];
+          const [bx, by] = vertices[(k + 1) % 3];
+          const cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+          if (k === 0) sign = Math.sign(cross);
+          else if (Math.sign(cross) !== sign) return false;
+        }
+        return true;
+      };
+      const reconstructed = (origin, which) => triangles.some((t) =>
+        inside(t, origin.x + halfCentre[which][0], origin.y + halfCentre[which][1]));
+
+      // Half a cell at a time, either reconstructed or not. Islands of the
+      // reconstruction grow by whole cells of it, so their edges follow the
+      // lattice rather than a circle — but the cell is a rhombus, and an island
+      // made of whole rhombi cannot end on a straight line along their diagonal.
+      // Split into the two triangular halves the DAS model is already built from,
+      // and all three edges come out straight.
+      const atoms = [];
+      for (const origin of latticeOrigins(a1, a2, extent, 40)) {
+        for (const which of [0, 1]) {
+          const basis = reconstructed(origin, which) ? si111.das : si111.bulk;
+          for (const atom of basis) {
+            if (atom[3] !== which) continue;
+            const x = origin.x + atom[0];
+            const y = origin.y + atom[1];
+            // Atoms off the field are dropped here rather than by the splat, so
+            // that the magnifier does not walk past them at every frame.
+            if (x < -4 || x > extent + 4 || y < -4 || y > extent + 4) continue;
+            atoms.push([x, y, atom[2]]);
+          }
+        }
+      }
+
+      const {b1, b2} = reciprocalVectors(a1, a2);
+      return {
+        atoms,
+        density: splatAtoms({n, extent, atoms}),
+        spots: superstructureSpots(b1, b2, {multiple: 7}),
+        scratch: complex(surface.patch * surface.patch),
+        pattern: new Float64Array(surface.patch * surface.patch),
+        display: new Float64Array(surface.patch * surface.patch),
+        map: new Float64Array(scan * scan),
+        seen: new Uint8Array(scan * scan),
+        cursor: 0,
+        at: (scan >> 1) * scan + (scan >> 1),
+        owed: 0,
+        done: false
+      };
+    })()
+  </script>
+  <script id="20b" type="text/x-typescript">
+    const surfaceRate = (surface.scan * surface.scan) / PERIOD
+  </script>
+
+  <!-- The loop. One for all three panels: three animation loops would each pull
+       the runtime once a frame and none of them would know what the others are
+       costing. -->
+  <script id="21" type="text/x-typescript" pinned="">
+    const frame = (function* () {
+      const cards = overview.cards;
+
+      // A ceiling on how much each panel does in one frame. The rates below are
+      // in positions per second and paced against the clock, because a count per
+      // frame is not a speed; the budget is what keeps a slow machine degrading
+      // instead of lurching.
+      const budget = qualityBudget({min: 1, max: 8, slowMs: 22, fastMs: 12});
+
+      // ---- panel one: ePIE ---------------------------------------------------
+      const {n, m} = epie;
+      const stride = n / m;
+      const area = n * n;
+      const phase = new Float64Array(area);
+      const intensity = new Float64Array(area);
+      const gradientCanvas = makeCanvas(side, side).canvas;
+      const methodsPattern = makeCanvas(side, side).canvas;
+      const imagingPattern = makeCanvas(side, side).canvas;
+
+      const positionFrom = (at, grid) => {
+        if (!at || at.x < 0 || at.x >= 1 || at.y < 0 || at.y >= 1) return null;
+        const row = Math.min(grid - 1, Math.floor(at.y * grid));
+        const col = Math.min(grid - 1, Math.floor(at.x * grid));
+        return row * grid + col;
+      };
+
+      const resetEpie = () => {
+        const r = reconstruction;
+        epieReset(r.state, {probe: epieOptics.probe});
+        r.order = scanOrder(m * m, r.random);
+        r.cursor = 0;
+        r.passes = 0;
+        r.visits = 0;
+        r.inspecting = false;
+      };
+
+      const advanceEpie = () => {
+        const r = reconstruction;
+        epieStep(r.state, run.model.data, r.order[r.cursor], {beta: epie.beta, probeBeta: 0});
+        r.last = r.order[r.cursor];
+        r.inspecting = false;
+        r.visits += 1;
+        r.cursor += 1;
+        if (r.cursor >= r.order.length) {
+          r.cursor = 0;
+          r.passes += 1;
+          r.order = scanOrder(r.order.length, r.random);
+        }
+      };
+
+      // A step size of zero runs the whole forward and backward calculation and
+      // leaves the specimen exactly where it was, so the panel can show what one
+      // position still wants to change without changing it.
+      const inspectEpie = (index) => {
+        const r = reconstruction;
+        epieStep(r.state, run.model.data, index, {beta: 0, probeBeta: 0});
+        r.last = index;
+        r.inspecting = true;
+      };
+
+      // ---- panel three: the surface -----------------------------------------
+      // The scan stays clear of the edges of the field. The surface is a finite
+      // patch rather than a periodic cell, and a beam that reaches the edge is
+      // measuring where the patch stops.
+      const scanStep = (surface.extent * (1 - 2 * surface.inset)) / (surface.scan - 1);
+      const scanOrigin = surface.extent * surface.inset;
+
+      const measureSurface = (index) => {
+        const s = surfaceState;
+        const row = (index / surface.scan) | 0;
+        const col = index % surface.scan;
+        const {pattern, n: pn, extent: pextent} = illuminatedPattern({
+          density: s.density, n: surface.n, extent: surface.extent,
+          x: scanOrigin + row * scanStep, y: scanOrigin + col * scanStep,
+          sigma: surface.beam, patch: surface.patch
+        }, s.scratch, s.pattern);
+
+        // What share of the counted intensity sits in spots the reconstruction
+        // alone produces. Zero on bulk-terminated ground, most of it on a
+        // reconstructed island.
+        //
+        // The disks are smaller than the ones a full-field transform would use,
+        // because the patch samples reciprocal space more coarsely and the gap
+        // between neighbouring fractional spots is only five samples wide.
+        const collect = {radius: 1.5, background: 3};
+        const fractional = spotSum(pattern, pn, pextent, s.spots.fractional, collect);
+        const integer = spotSum(pattern, pn, pextent, s.spots.integer, collect);
+        const total = fractional + integer;
+        s.map[index] = total > 0 ? fractional / total : 0;
+        s.seen[index] = 1;
+        s.at = index;
+      };
+
+      const rescanSurface = () => {
+        const s = surfaceState;
+        s.cursor = 0;
+        s.done = false;
+      };
+
+      // ---- drawing -----------------------------------------------------------
+      const logCeiling = Math.log1p(1e3);
+      const logMap = (source, out, count, decades = 1e3) => {
+        let peak = 0;
+        for (let i = 0; i < count; i++) if (source[i] > peak) peak = source[i];
+        const scale = peak > 0 ? decades / peak : 0;
+        const ceiling = Math.log1p(decades);
+        for (let i = 0; i < count; i++) {
+          out[i] = (Math.log1p(scale * source[i]) / ceiling) * logCeiling;
+        }
+        return out;
+      };
+
+      // A word saying what the picture is, since the caption underneath names the
+      // research direction rather than the panel. Top left, which leaves the two
+      // bottom corners to the scalebar and the inset. Drawn twice, dark under
+      // light: it sits on an image, not on the page, and these images run from
+      // black to white within a few pixels of each other.
+      const tag = (ctx, text) => {
+        const dpr = ctx.canvas.width / side;
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.font = "500 10px system-ui, sans-serif";
+        ctx.textBaseline = "top";
+        ctx.lineJoin = "round";
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.strokeText(text, 7, 6);
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.fillText(text, 7, 6);
+        ctx.restore();
+      };
+
+      // The pattern, in the corner opposite the tag.
+      const inset = (ctx, source) => {
+        const dpr = ctx.canvas.width / side;
+        const box = Math.round(side * 0.36);
+        const x = ctx.canvas.width - Math.round((box + 6) * dpr);
+        const y = ctx.canvas.height - Math.round((box + 6) * dpr);
+        ctx.drawImage(source, x, y, Math.round(box * dpr), Math.round(box * dpr));
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.55)";
+        ctx.lineWidth = Math.max(1, dpr);
+        ctx.strokeRect(x, y, Math.round(box * dpr), Math.round(box * dpr));
+        ctx.restore();
+      };
+
+      const ring = (ctx, cx, cy, radius) => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+        ctx.lineWidth = Math.max(2, radius * 0.1);
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.stroke();
+        ctx.lineWidth = Math.max(1, radius * 0.05);
+        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const drawMethods = () => {
+        const r = reconstruction;
+        const card = cards.methods;
+        const image = r.visits > 0
+          ? applyColormap(histogramScaling(reconstructedPhase(r.state, phase)), {colormap: "gray"})
+          : applyColormap(new Float64Array(area), {colormap: "gray", vmin: -1, vmax: 1});
+        const ctx = blit(card.canvas, image, n, n, {size: side});
+
+        const scale = ctx.canvas.width / n;
+        const cy = (((r.last / m) | 0) * stride + 0.5) * scale;
+        const cx = ((r.last % m) * stride + 0.5) * scale;
+        const radius = (epieOptics.width / 2) * scale;
+
+        if (r.inspecting) {
+          // What this position would change, shown where the probe is standing.
+          const gradient = r.state.stages.gradient;
+          let limit = 1e-9;
+          for (let i = 0; i < area; i++) limit = Math.max(limit, Math.abs(gradient[i]));
+          blit(gradientCanvas,
+            applyColormap(gradient, {colormap: "PuOr", vmin: -limit, vmax: limit}),
+            n, n, {size: side});
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+          ctx.clip();
+          ctx.drawImage(gradientCanvas, 0, 0, ctx.canvas.width, ctx.canvas.height);
+          ctx.restore();
+        }
+        ring(ctx, cx, cy, radius);
+
+        if (run.ready) {
+          const base = r.last * area;
+          for (let i = 0; i < area; i++) {
+            const amplitude = run.model.data[base + i];
+            intensity[i] = amplitude * amplitude;
+          }
+          const middle = cropCenter(
+            fftshift(logMap(intensity, intensity, area, 1e4), n, n), n, n, epie.crop);
+          blit(methodsPattern,
+            applyColormap(middle.data, {colormap: "magma", vmin: 0, vmax: logCeiling}),
+            middle.nx, middle.ny, {size: side});
+          inset(ctx, methodsPattern);
+        }
+        drawScalebar(ctx, {
+          extent: epie.extent, corner: "bottom-left",
+          // A bar that is a tenth of a small panel reads as a dash. A third of
+          // it is still unambiguously a scalebar and can be measured by eye.
+          length: niceScalebarLength(epie.extent, 0.3)
+        });
+        tag(ctx, r.inspecting ? "inspecting" : "ePIE · apoferritin");
+      };
+
+      const drawOptics = (B0, roll) => {
+        const card = cards.optics;
+        const {ctx} = card;
+        const rays = traceBundle(B0, lens.steps);
+        const {z0, z1} = lens.span;
+        const {rMax, aspect} = lensFrame;
+        const centre = [side / 2, side * 0.46];
+        const camera = makeView(14, -28,
+          Math.min((side * 0.46) / aspect, side * 0.34), centre[0], centre[1], 0);
+        // The optic axis is `project`'s x, and the picture is turned afterwards
+        // rather than the scene, which keeps the depth cueing — and the text —
+        // where they were.
+        //
+        // By how much is measured, not chosen: the camera's elevation already
+        // tilts the axis in screen space, so a fixed quarter turn leaves it
+        // visibly off vertical. Project the axis, then turn the picture by
+        // whatever puts it straight down the panel.
+        const spin = (() => {
+          const head = project(-aspect, 0, 0, camera);
+          const tail = project(aspect, 0, 0, camera);
+          return Math.PI / 2 - Math.atan2(tail.sy - head.sy, tail.sx - head.sx);
+        })();
+        const spinCos = Math.cos(spin);
+        const spinSin = Math.sin(spin);
+
+        ctx.clearRect(0, 0, side, side);
+        const foreground = currentColor(card.canvas);
+        const tint = (alpha) => withAlpha(foreground, alpha);
+        // A faint ground, so a line drawing sits in a panel rather than in a
+        // hole between two images. Taken from the text colour, so it inverts
+        // with the theme without needing to know which theme it is.
+        ctx.fillStyle = tint(0.045);
+        ctx.fillRect(0, 0, side, side);
+
+        // The roll is applied here rather than through the camera's azimuth,
+        // which would turn the other two axes with it and swing the optic axis
+        // out of the frame.
+        const cos = Math.cos(roll);
+        const sin = Math.sin(roll);
+        const at = (za, rx, ry) => {
+          const u = (((za - z0) / (z1 - z0)) - 0.5) * 2 * aspect;
+          const vx = rx / rMax;
+          const vy = ry / rMax;
+          const p = project(u, vx * sin + vy * cos, vx * cos - vy * sin, camera);
+          const dx = p.sx - centre[0];
+          const dy = p.sy - centre[1];
+          p.sx = centre[0] + dx * spinCos - dy * spinSin;
+          p.sy = centre[1] + dx * spinSin + dy * spinCos;
+          // Transverse depth only: the full depth also runs along the optic axis
+          // once the camera has an azimuth, and shading by that makes the far end
+          // of the column paler than the near end, which reads as fog.
+          p.cue = (vx * sin + vy * cos) * camera.ca * camera.ce
+            - (vx * cos - vy * sin) * camera.se;
+          return p;
+        };
+
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = tint(0.4);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        const head = at(z0, 0, 0);
+        const tail = at(z1, 0, 0);
+        ctx.moveTo(head.sx, head.sy);
+        ctx.lineTo(tail.sx, tail.sy);
+        ctx.stroke();
+        ctx.restore();
+
+        // The lens, as three rings across the bundle's own width where it
+        // arrives — a ring at a fixed fraction of the frame reads as a lens
+        // larger than the beam it is focusing.
+        const bore = Math.min(rMax, lens.angle * Math.abs(z0) * 1.15);
+        for (const za of [-lens.a, 0, lens.a]) {
+          ctx.save();
+          ctx.strokeStyle = tint(za === 0 ? 0.42 : 0.2);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let i = 0; i <= 48; i++) {
+            const phi = (2 * Math.PI * i) / 48;
+            const p = at(za, bore * Math.cos(phi), bore * Math.sin(phi));
+            if (i === 0) ctx.moveTo(p.sx, p.sy);
+            else ctx.lineTo(p.sx, p.sy);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // Rays in depth bands, so near segments cover far ones without sorting
+        // every segment individually.
+        const BANDS = 16;
+        const every = 3;
+        const banded = Array.from({length: BANDS}, () =>
+          Array.from({length: lens.shells}, () => []));
+        let lo = Infinity;
+        let hi = -Infinity;
+        const projected = rays.map((ray) => {
+          const points = [];
+          for (let i = 0; i < ray.z.length; i += every) {
+            const p = at(ray.z[i], ray.x[i], ray.y[i]);
+            if (p.cue < lo) lo = p.cue;
+            if (p.cue > hi) hi = p.cue;
+            points.push(p);
+          }
+          return {points, shell: ray.shell};
+        });
+        const spread = hi - lo || 1;
+        for (const {points, shell} of projected) {
+          for (let i = 1; i < points.length; i++) {
+            const cue = (points[i - 1].cue + points[i].cue) / 2;
+            const band = Math.min(BANDS - 1,
+              Math.max(0, Math.floor(((cue - lo) / spread) * BANDS)));
+            banded[band][shell].push(points[i - 1], points[i]);
+          }
+        }
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(1, 1, side - 2, side - 2);
+        ctx.clip();
+        ctx.lineCap = "round";
+        for (let band = 0; band < BANDS; band++) {
+          const t = band / (BANDS - 1);
+          ctx.lineWidth = 0.8 + 0.8 * t;
+          for (let shell = 0; shell < lens.shells; shell++) {
+            const segments = banded[band][shell];
+            if (segments.length === 0) continue;
+            ctx.strokeStyle = withAlpha(SERIES[shell % SERIES.length], 0.3 + 0.65 * t);
+            ctx.beginPath();
+            for (let i = 0; i < segments.length; i += 2) {
+              ctx.moveTo(segments[i].sx, segments[i].sy);
+              ctx.lineTo(segments[i + 1].sx, segments[i + 1].sy);
+            }
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+
+        ctx.save();
+        ctx.font = "500 10px system-ui, sans-serif";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = tint(0.75);
+        ctx.fillText(`Glaser lens · B₀ = ${(B0 * 1e3).toFixed(0)} mT`, 7, 6);
+        ctx.restore();
+      };
+
+      // The surface up close, where the beam is standing.
+      //
+      // Worth the space it takes: it is the difference between the two halves of
+      // this panel's claim. On a reconstructed island the adatoms are there, in
+      // their triangular array around the corner holes; a few cells away on
+      // bulk-terminated ground they are not, and the pattern loses its fractional
+      // spots in the same step. One colour per layer, from the same ramp the map
+      // uses, so the bright atoms and the bright regions mean the same thing.
+      const LAYERS = ["#0f3956", "#567269", "#bca36b"];
+      // Two and a half cells across: enough for the corner holes and the whole
+      // adatom array, and enough room around the beam to see it is smaller than
+      // the field it is standing in.
+      const zoomHalf = 1.25 * Math.hypot(si111.a1[0], si111.a1[1]);
+
+      const drawAtoms = (ctx, alpha, centre) => {
+        const s = surfaceState;
+        const W = ctx.canvas.width;
+        const scale = W / (2 * zoomHalf);
+        const depths = [...new Set(s.atoms.map((a) => a[2]))].sort((a, b) => b - a);
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = "#05070a";
+        ctx.fillRect(0, 0, W, ctx.canvas.height);
+        for (const atom of s.atoms) {
+          const dx = atom[0] - centre.x;
+          const dy = atom[1] - centre.y;
+          if (Math.abs(dx) > zoomHalf + 2 || Math.abs(dy) > zoomHalf + 2) continue;
+          const level = Math.max(0, depths.indexOf(atom[2]));
+          ctx.fillStyle = LAYERS[Math.min(level, LAYERS.length - 1)];
+          ctx.beginPath();
+          ctx.arc((dy + zoomHalf) * scale, (dx + zoomHalf) * scale,
+            scale * (0.9 + 0.35 * level), 0, 2 * Math.PI);
+          ctx.fill();
+        }
+        // Where the beam is, at the width it actually has.
+        ctx.strokeStyle = "rgba(255,255,255,0.8)";
+        ctx.lineWidth = Math.max(1, scale * 0.12);
+        ctx.setLineDash([scale * 0.8, scale * 0.8]);
+        ctx.beginPath();
+        ctx.arc(zoomHalf * scale, zoomHalf * scale, 1.5 * surface.beam * scale, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      const drawImaging = (hovering) => {
+        const s = surfaceState;
+        const card = cards.imaging;
+        const grid = surface.scan;
+
+        // The map, with everything the beam has not reached yet left flat, so
+        // that an unmeasured position does not read as a measured zero.
+        const rgba = applyColormap(s.map, {colormap: "eclipse", vmin: 0, vmax: 1.2});
+        for (let i = 0; i < s.seen.length; i++) {
+          if (s.seen[i]) continue;
+          rgba[4 * i] = 128;
+          rgba[4 * i + 1] = 128;
+          rgba[4 * i + 2] = 128;
+        }
+        const ctx = blit(card.canvas, rgba, grid, grid, {size: side, smooth: false});
+
+        const scale = ctx.canvas.width / grid;
+        ring(ctx, ((s.at % grid) + 0.5) * scale, (((s.at / grid) | 0) + 0.5) * scale,
+          Math.max(3, (surface.beam / scanStep) * scale * 0.5));
+
+        const patch = surface.patch;
+        const cropped = cropCenter(
+          fftshift(logMap(s.pattern, s.display, patch * patch, 1e5), patch, patch),
+          patch, patch, surface.crop);
+        blit(imagingPattern,
+          applyColormap(cropped.data, {colormap: "magma", vmin: 0, vmax: logCeiling}),
+          cropped.nx, cropped.ny, {size: side});
+        if (hovering > 0.01) {
+          drawAtoms(ctx, hovering, {
+            x: scanOrigin + ((s.at / grid) | 0) * scanStep,
+            y: scanOrigin + (s.at % grid) * scanStep
+          });
+        }
+
+        inset(ctx, imagingPattern);
+        // The bar means whichever of the two pictures is on top.
+        const shown = hovering > 0.5 ? 2 * zoomHalf : grid * scanStep;
+        drawScalebar(ctx, {
+          extent: shown, corner: "bottom-left", length: niceScalebarLength(shown, 0.3)
+        });
+        tag(ctx, hovering > 0.5 ? "Si(111)-(7×7) · atoms" : "Si(111)-(7×7)");
+      };
+
+      // ---- the loop ----------------------------------------------------------
+      let last = performance.now();
+      let roll = 0.6;
+      let sweptFor = 0;
+
+      let drawn = -1;
+      for (const tick of frames({fps: 30, playing: visible})) {
+        // `frames` throttles the value it yields, not the loop body: the runtime
+        // pulls a generator cell once per animation frame whatever `fps` says.
+        // Doing the work only when the count moves is what makes 30 mean 30, and
+        // halves what a row of three panels costs a landing page.
+        if (tick === drawn) {
+          yield tick;
+          continue;
+        }
+        drawn = tick;
+        const started = performance.now();
+        const elapsed = Math.min(0.25, (started - last) / 1000);
+        last = started;
+        const cap = Math.max(1, budget.value);
+
+        // Panel one.
+        if (!run.ready) {
+          if (run.model.step(Math.max(4, cap * 4)) === 0) run.ready = true;
+        } else {
+          const r = reconstruction;
+          const held = cards.methods.hover.value > 0.02;
+          const index = held ? positionFrom(cards.methods.at, m) : null;
+          if (index !== null) {
+            if (index !== r.last || !r.inspecting) inspectEpie(index);
+          } else if (r.passes >= epie.passes) {
+            resetEpie();
+          } else if (!reducedMotion || r.passes < 1) {
+            r.owed = Math.min(r.owed + elapsed * epieRate, cap);
+            while (r.owed >= 1) {
+              advanceEpie();
+              r.owed -= 1;
+              if (r.passes >= epie.passes) {
+                r.owed = 0;
+                break;
+              }
+            }
+          }
+        }
+
+        // Panel two. The sweep runs on its own clock, so that leaving and
+        // returning to the card does not restart it halfway up.
+        const hovering = cards.optics.hover.value;
+        sweptFor += elapsed * hovering;
+        const phase01 = 0.5 - 0.5 * Math.cos((sweptFor / lens.sweepSeconds) * 2 * Math.PI);
+        const B0 = lens.B0 + hovering * (lens.sweep[0] + phase01 * (lens.sweep[1] - lens.sweep[0]) - lens.B0);
+        if (!reducedMotion || hovering > 0.02) {
+          roll += elapsed * ((2 * Math.PI) / PERIOD);
+        }
+
+        // Panel three.
+        {
+          const s = surfaceState;
+          const held = cards.imaging.hover.value > 0.02;
+          const index = held ? positionFrom(cards.imaging.at, surface.scan) : null;
+          if (index !== null) {
+            if (index !== s.at) measureSurface(index);
+          } else if (s.done) {
+            if (!reducedMotion) rescanSurface();
+          } else {
+            s.owed = Math.min(s.owed + elapsed * surfaceRate, cap);
+            while (s.owed >= 1) {
+              measureSurface(s.cursor);
+              s.cursor += 1;
+              s.owed -= 1;
+              if (s.cursor >= s.map.length) {
+                s.cursor = 0;
+                s.done = true;
+                s.owed = 0;
+                break;
+              }
+            }
+          }
+        }
+
+        drawMethods();
+        drawOptics(B0, roll);
+        drawImaging(cards.imaging.hover.value);
+
+        budget.report(performance.now() - started);
+        yield tick;
+      }
+    })()
+  </script>
+</notebook>

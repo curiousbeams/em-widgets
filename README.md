@@ -18,7 +18,7 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Fourteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+Fifteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
 `aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
 against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
@@ -30,9 +30,11 @@ which drives an SEM or a S/TEM column from one table of components,
 phase retrieval, `aperture-overlap`, which draws both slices of the aperture
 overlap function every direct phase-retrieval method is built on, and
 `direct-ptychography`, which runs SSB, OBF, parallax and iCOM through one
-pipeline where only the kernel changes, and `iterative-ptychography`, which
+pipeline where only the kernel changes, `iterative-ptychography`, which
 draws ePIE as the closed loop it is and lets you take one scan position at a
-time.
+time, and `research-overview`, a row of three square thumbnails that run
+themselves and hand over to the pointer on hover — the landing-page form of
+three of the others.
 
 ## Adding a widget to a page
 
@@ -260,13 +262,14 @@ duplicated across the lab's Python notebooks.
 | `color.js` | `complexToRGB` (inverse CIECAM02), `phaseWheel`, `applyColormap` — magma, gray, twilight, RdBu, PuOr, PiYG, eclipse |
 | `scene3d.js` | `makeView`, `project`/`unproject`, `drawSpheres`, `drawPlane`, `drawProbeCone` — canvas 2D, no WebGL |
 | `ui.js` | `scene`, `panels`, `row`/`column`, `controls`, `collapsible`, `toggleButton`, `vectorPad` (magnitude and axis in one gesture), `flowDiagram` (panels joined by labelled arrows, canvases or arbitrary content), `UI` and `SERIES` (the lab's palettes) |
-| `anim.js` | `frames`, `whenVisible`, `qualityBudget` — generator cells the Observable scheduler drives |
+| `anim.js` | `frames`, `whenVisible`, `hoverTracker`, `sweep`/`pingPong`, `qualityBudget` — generator cells the Observable scheduler drives |
 | `canvas.js` | `blit`, `drawQuiver`, `drawScalebar`, `colorbar`, `currentColor`, `pointerToIndices` |
 | `projections.js` | `generalisedProjection`, `productProjection`, `namedParameters` (AP/DM/RRR/RAAR), `line`, `polarCurve`, `iteration`, `residual` |
 | `ptycho.js` | `overlapFunction` and `overlapFunctionAtQ` (the two slices of Γ), `overlapRegions`, `overlapSums`, `parallaxShifts`, `tileSpectrum`, `directAccumulator`/`accumulatePixel`/`directImage`, `directCTF`, `directSSNR` |
 | `ptycho-sim.js` | `measurePosition`, `forwardModel` (resumable; a detector subset and either data layout), `scanSpectra` |
 | `epie.js` | `epieState` (complex or potential object, with positivity), `epieStep` (one position, object and probe), `epieReset`, `reconstructedPhase`, `scanOrder`, `probeDiameter`, `centreSpectrum` |
 | `raytrace.js` | `transferMatrix`, `traceRays`, `traceParallel`, `traceFrom`, `COLUMNS`/`buildColumn`, `reverseColumn`, `findCrossovers`/`findPlanes`, `pairedSeparationAt` |
+| `surface.js` | `reciprocalVectors`, `latticeOrigins`, `splatAtoms` (depth-weighted, so it is a surface measurement), `beamWindow`, `diffractionPattern`, `superstructureSpots`, `spotSum` (with the local background subtracted) |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |
 
 ### Conventions

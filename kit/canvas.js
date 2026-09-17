@@ -288,7 +288,7 @@ export function niceScalebarLength(extent, fraction = 0.25) {
 }
 
 /**
- * Draw a scalebar in the lower-right corner, matching the look of
+ * Draw a scalebar in a corner of the image, matching the look of
  * `ctf/visualize.py:add_scalebar`.
  *
  * @param {CanvasRenderingContext2D} ctx
@@ -303,10 +303,14 @@ export function niceScalebarLength(extent, fraction = 0.25) {
  * @param {[number, number]} [options.box] the image's size in the drawing
  *   context's own units. Needed only for a context that has already been scaled,
  *   as `ui.makeCanvas` returns; `blit` records its own ratio instead.
+ * @param {"bottom-right"|"bottom-left"|"top-right"|"top-left"} [options.corner="bottom-right"]
+ *   which corner to sit in — the default is the conventional one, and the rest
+ *   are for panels whose usual corner is already taken by an inset or a label.
  */
 export function drawScalebar(
   ctx,
-  {extent, units = "Å", length, color = "white", pad = 12, box, halo = "rgba(0,0,0,0.55)"}
+  {extent, units = "Å", length, color = "white", pad = 12, box, halo = "rgba(0,0,0,0.55)",
+   corner = "bottom-right"}
 ) {
   const canvas = ctx.canvas;
   const barUnits = length ?? niceScalebarLength(extent);
@@ -323,8 +327,9 @@ export function drawScalebar(
 
   const height = Math.max(2, Math.round(3 * scale));
   const padPx = pad * scale;
-  const x = boxWidth - padPx - barPx;
-  const y = boxHeight - padPx - height;
+  const x = corner.endsWith("left") ? padPx : boxWidth - padPx - barPx;
+  // The label sits above the bar, so a bar at the top needs room for it.
+  const y = corner.startsWith("top") ? padPx + Math.round(14 * scale) : boxHeight - padPx - height;
 
   ctx.save();
   const fontPx = Math.round(12 * scale);

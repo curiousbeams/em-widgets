@@ -43,3 +43,4 @@ export * from "./projections.js";
 export * from "./ptycho.js";
 export * from "./ptycho-sim.js";
 export * from "./epie.js";
+export * from "./surface.js";
