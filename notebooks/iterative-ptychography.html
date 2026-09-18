@@ -253,7 +253,17 @@ With **probe: fixed** the probe is held exactly as it was set and only the
     const dose = settled(doseInput)
   </script>
   <script id="20" type="text/x-typescript">
-    const probeKnown = settled(probeInput) === "fixed"
+    // Two cells, and not one, which is the whole of a bug this widget shipped
+    // with. A cell whose value IS a generator is unwrapped by the runtime and
+    // re-runs every time it yields; a cell that compares the generator to a
+    // string compares the generator object itself, which is never equal to
+    // anything. `settled(probeInput) === "fixed"` was therefore false whatever
+    // the radio said, so the probe was always refined and always started from
+    // the wrong defocus.
+    const probeMode = settled(probeInput)
+  </script>
+  <script id="20b" type="text/x-typescript">
+    const probeKnown = probeMode === "fixed"
   </script>
 
   <script id="21" type="text/x-typescript">

@@ -430,3 +430,82 @@ export function probeDiameter(probeReal, n, fraction = 0.9) {
   }
   return n;
 }
+
+/**
+ * One sweep of ePIE over a one-dimensional object.
+ *
+ * The same step as {@link epieStep} in its `"potential"` parameterisation, with
+ * one axis instead of two. It is here because a projection is a line: a
+ * tomographic tilt series measures one of these per angle, and solving them is
+ * what a ptychographic-tomographic reconstruction does inside its outer loop.
+ *
+ * The phase it returns is fixed only up to an additive constant. A measurement
+ * of `|F[e^{i phi} P]|` cannot see a constant added to `phi`, because that
+ * multiplies the exit wave by a constant phase factor and the detector records
+ * modulus. Every position in the sweep has the same blind spot, so sweeping does
+ * not remove it — which is exactly why a tilt series reconstructed one
+ * projection at a time comes back with a different offset on every line.
+ *
+ * @param {Float64Array} phase the estimate, `n` long, updated in place
+ * @param {{re: Float64Array, im: Float64Array}} probe real-space, centred at index 0
+ * @param {Float64Array} amplitudes measured `sqrt(I)`, laid out `[position][k]`
+ * @param {ArrayLike<number>} positions integer offsets, one per measurement
+ * @param {object} [options]
+ * @param {number} [options.beta=0.9] step size
+ * @param {{re: Float64Array, im: Float64Array}} [scratch]
+ * @returns {number} the amplitude residual, as a fraction of the measured total
+ */
+export function epieLine(phase, probe, amplitudes, positions, {beta = 0.9} = {},
+                         scratch = complex(phase.length)) {
+  const n = phase.length;
+  const {re, im} = scratch;
+  let probePeak = 0;
+  for (let i = 0; i < n; i++) {
+    probePeak = Math.max(probePeak, probe.re[i] * probe.re[i] + probe.im[i] * probe.im[i]);
+  }
+  if (probePeak === 0) return 0;
+
+  let residual = 0;
+  let measured = 0;
+
+  for (let p = 0; p < positions.length; p++) {
+    const shift = positions[p];
+    const base = p * n;
+
+    // The exit wave: the object times the probe, moved to this position.
+    for (let i = 0; i < n; i++) {
+      const s = ((i - shift) % n + n) % n;
+      const cos = Math.cos(phase[i]);
+      const sin = Math.sin(phase[i]);
+      re[i] = cos * probe.re[s] - sin * probe.im[s];
+      im[i] = cos * probe.im[s] + sin * probe.re[s];
+    }
+    // `fft2` over an n x 1 grid is a one-dimensional transform.
+    fft2(scratch, n, 1);
+
+    // Replace the modelled modulus with the measured one.
+    for (let i = 0; i < n; i++) {
+      const modulus = Math.hypot(re[i], im[i]);
+      const target = amplitudes[base + i];
+      residual += Math.abs(modulus - target);
+      measured += target;
+      const scale = modulus > 1e-12 ? target / modulus : 0;
+      re[i] = re[i] * scale - re[i];
+      im[i] = im[i] * scale - im[i];
+    }
+    ifft2(scratch, n, 1);
+
+    // And push the correction into the phase.
+    for (let i = 0; i < n; i++) {
+      const s = ((i - shift) % n + n) % n;
+      const cos = Math.cos(phase[i]);
+      const sin = Math.sin(phase[i]);
+      // Im{ conj(O P) dpsi } — the same gradient the 2D potential branch takes,
+      // written out.
+      const cr = cos * probe.re[s] - sin * probe.im[s];
+      const ci = -(cos * probe.im[s] + sin * probe.re[s]);
+      phase[i] += (beta * (cr * im[i] + ci * re[i])) / probePeak;
+    }
+  }
+  return measured > 0 ? residual / measured : 0;
+}

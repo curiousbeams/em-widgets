@@ -5,11 +5,12 @@ import {electronWavelength} from "../kit/units.js";
 import {angularSpatialFrequencies} from "../kit/grid.js";
 import {complexProbe} from "../kit/optics.js";
 import {mulberry32} from "../kit/specimen.js";
+import {poisson} from "../kit/image.js";
 import {complex, fft2, ifft2} from "../kit/fft.js";
 import {forwardModel} from "../kit/ptycho-sim.js";
 import {
   epieState, epieStep, epieReset, reconstructedPhase, scanOrder, probeDiameter,
-  centreSpectrum
+  centreSpectrum, epieLine
 } from "../kit/epie.js";
 
 // Small enough that a few sweeps are milliseconds, big enough that the probe
@@ -527,4 +528,111 @@ test("the scan order is a permutation", () => {
   assert.equal(order.length, M * M);
   const seen = new Set(order);
   assert.equal(seen.size, M * M, "the shuffle lost or repeated a position");
+});
+
+// ---------------------------------------------------------------------------
+// One dimension: the step a tilt series takes at every angle.
+// ---------------------------------------------------------------------------
+
+/** A line of measurements from a known phase, at a given dose. */
+function lineExperiment(n, truth, {width = 4, stride = 4, dose = Infinity, seed = 1} = {}) {
+  const probe = complex(n);
+  for (let i = 0; i < n; i++) {
+    const s = i > n / 2 ? i - n : i;
+    probe.re[i] = Math.exp(-(s * s) / (2 * width * width));
+  }
+  const positions = Int32Array.from({length: n / stride}, (_, i) => i * stride);
+  const amplitudes = new Float64Array(positions.length * n);
+  const buffer = complex(n);
+  const random = mulberry32(seed);
+  for (let p = 0; p < positions.length; p++) {
+    const shift = positions[p];
+    for (let i = 0; i < n; i++) {
+      const s = ((i - shift) % n + n) % n;
+      buffer.re[i] = Math.cos(truth[i]) * probe.re[s];
+      buffer.im[i] = Math.sin(truth[i]) * probe.re[s];
+    }
+    fft2(buffer, n, 1);
+    for (let i = 0; i < n; i++) {
+      let intensity = buffer.re[i] ** 2 + buffer.im[i] ** 2;
+      if (Number.isFinite(dose)) intensity = poisson(intensity * dose, random) / dose;
+      amplitudes[p * n + i] = Math.sqrt(intensity);
+    }
+  }
+  return {probe, positions, amplitudes};
+}
+
+function smoothLine(n, amplitude = 0.8) {
+  const truth = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (2 * Math.PI * i) / n;
+    truth[i] = amplitude * (Math.sin(x) + 0.4 * Math.cos(3 * x + 0.7) + 0.25 * Math.sin(5 * x));
+  }
+  return truth;
+}
+
+test("one-dimensional ePIE recovers a line, up to a constant", () => {
+  const n = 64;
+  const truth = smoothLine(n);
+  const {probe, positions, amplitudes} = lineExperiment(n, truth);
+
+  const phase = new Float64Array(n);
+  let residual = 1;
+  for (let sweep = 0; sweep < 200; sweep++) {
+    residual = epieLine(phase, probe, amplitudes, positions, {beta: 0.9});
+  }
+
+  const mean = (a) => a.reduce((sum, v) => sum + v, 0) / a.length;
+  const offsetTruth = mean(truth);
+  const offsetPhase = mean(phase);
+  let worst = 0;
+  for (let i = 0; i < n; i++) {
+    worst = Math.max(worst, Math.abs((phase[i] - offsetPhase) - (truth[i] - offsetTruth)));
+  }
+  assert.ok(residual < 1e-3, `residual ${residual}`);
+  assert.ok(worst < 0.02, `worst phase error ${worst} rad`);
+});
+
+test("the constant is the one thing it cannot recover", () => {
+  // Two runs from different starting offsets land on the same shape at different
+  // heights, because the measurement is blind to a constant added to the phase.
+  // A tilt series reconstructed one projection at a time therefore comes back
+  // with a different offset on every line, which is the artefact a joint
+  // reconstruction exists to avoid.
+  const n = 64;
+  const truth = smoothLine(n);
+  const {probe, positions, amplitudes} = lineExperiment(n, truth);
+
+  const runs = [0, 1.3].map((start) => {
+    const phase = new Float64Array(n).fill(start);
+    for (let sweep = 0; sweep < 200; sweep++) {
+      epieLine(phase, probe, amplitudes, positions, {beta: 0.9});
+    }
+    return phase;
+  });
+
+  const differences = Float64Array.from(runs[0], (v, i) => v - runs[1][i]);
+  const mean = differences.reduce((sum, v) => sum + v, 0) / n;
+  let spread = 0;
+  for (const d of differences) spread = Math.max(spread, Math.abs(d - mean));
+  assert.ok(Math.abs(mean) > 0.5, `the two runs should differ by a constant, got ${mean}`);
+  assert.ok(spread < 0.02, `and by nothing else, got ${spread}`);
+});
+
+test("shot noise puts a floor under the residual", () => {
+  const n = 64;
+  const truth = smoothLine(n);
+  const quiet = lineExperiment(n, truth, {dose: 1e6, seed: 4});
+  const noisy = lineExperiment(n, truth, {dose: 1e3, seed: 4});
+
+  const settle = (experiment) => {
+    const phase = new Float64Array(n);
+    let residual = 1;
+    for (let sweep = 0; sweep < 150; sweep++) {
+      residual = epieLine(phase, experiment.probe, experiment.amplitudes,
+        experiment.positions, {beta: 0.9});
+    }
+    return residual;
+  };
+  assert.ok(settle(noisy) > 3 * settle(quiet), "a noisy measurement cannot be fitted as closely");
 });

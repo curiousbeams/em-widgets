@@ -1,0 +1,618 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Scanning surface diffraction</title>
+  <script id="1" type="text/markdown">
+    # Scanning surface diffraction
+  </script>
+  <script id="2" type="text/markdown">
+    A clean surface rearranges its top layer into a cell larger than the one the
+    bulk beneath it repeats with. Si(111) does it seven-fold, into the
+    dimer-adatom-stacking-fault cell, and a larger cell in real space means extra
+    spots in reciprocal space: six of them between every pair of substrate spots,
+    at sevenths. Those fractional spots are the signature. They say that the
+    surface has reconstructed, and nothing else in the pattern does.
+
+    A beam wide enough to cover the whole surface sees the fractional spots of
+    every reconstructed patch at once and cannot say where any of them is.
+    **Focus it down and scan it**, and the pattern changes as the beam crosses
+    from an island of the reconstruction onto bulk-terminated ground — so the map
+    of how much intensity sits in the fractional spots is an image of where the
+    surface has reconstructed.
+
+    **Press play** to raster the beam, or **hover the map** to drive it by hand.
+    The left panel is the surface the beam is standing on, at the beam's own
+    scale: tan adatoms on top of the two levels of the bilayer, with the corner
+    holes of the 7×7 cell between them. Cross an island edge and the adatoms
+    disappear while the fractional spots leave the pattern, in the same step.
+
+    **The beam-width slider is the widget's point.** Real-space resolution and
+    reciprocal-space spot separation trade against each other: the pattern from a
+    beam of width ${tex`\sigma`} has spots spread by ${tex`1/2\pi\sigma`}, and the
+    fractional spots are only ${tex`1/7`} of a substrate spacing apart. Focus
+    past about ${tex`a/\pi`} and neighbouring spots overlap, the measure stops
+    telling the two families apart, and the map washes out however finely the
+    scan is stepped. Open it up and the spots sharpen while the islands blur.
+
+    The reconstruction is the real one, built by `tools/si111-7x7.py` in the four
+    steps it is usually explained in — corner hole, dimers, stacking fault,
+    adatoms. Islands of it are placed as whole triangular half-cells, which is
+    why their edges are straight: the 7×7 cell is a rhombus, and its two halves
+    are the faulted and unfaulted ones, so the diagonal between them is a
+    direction the surface itself uses. Both orientations appear because
+    successive bilayer terraces are rotated by half a turn with respect to each
+    other.
+
+    The pattern is a kinematical transform of the atoms the beam stands on,
+    weighted by how deep they lie, because an electron that scatters elastically
+    and comes back out carries the first few Angstroms and not what is under
+    them. At a finite **dose** it is counted rather than computed, and the
+    measure has to work on counts: each spot is a small disk with the average of
+    the annulus around it subtracted, because anything that interrupts the
+    surface's periodicity — an island edge, a defect — scatters diffusely into
+    every spot position at once. Counted raw, a beam sitting on an island edge
+    reads as *more* ordered than one in the middle of it.
+  </script>
+
+  <script id="3" type="text/x-typescript">
+    const controlsView = display(controlPanel);
+  </script>
+  <script id="3b" type="text/x-typescript">
+    const surfaceView = display(panelRow.node);
+  </script>
+  <script id="3c" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="4" type="text/x-typescript">
+    import {
+      complex, fftshift, cropCenter, applyColormap, blit, makeCanvas, drawScalebar,
+      niceScalebarLength, currentColor, withAlpha, mulberry32, applyShotNoise,
+      panels, controls as gridControls, badge, row, column, toggleButton, ensureStyles,
+      frames, whenVisible, qualityBudget, hoverTracker,
+      reciprocalVectors, latticeOrigins, splatAtoms, illuminatedPattern,
+      superstructureSpots, spotSum, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+  <script id="4b" type="text/x-typescript">
+    import {resolveAsset} from "https://curiousbeams.github.io/em-widgets/kit/data.js"
+  </script>
+
+  <!-- The surface -->
+  <script id="5" type="text/x-typescript">
+    // The Si(111)-(7x7) cell: the reconstruction and the bulk-terminated bilayer
+    // it forms on, sharing one cell, each atom tagged with which half of the
+    // rhombus it belongs to.
+    const si111 = await (await fetch(resolveAsset(
+      "https://curiousbeams.github.io/em-widgets/data/si111-7x7.json"))).json()
+  </script>
+  <script id="6" type="text/x-typescript">
+    const field = ({
+      n: 460,                // grid points across the field
+      extent: 500,           // Angstrom
+      patch: 128,            // grid points transformed at each scan position
+      inset: 0.2,            // how far in from the edge the scan stays
+      escapeDepth: 3         // Angstrom: how far down the measurement sees
+    })
+  </script>
+  <script id="7" type="text/x-typescript">
+    // Where the surface has reconstructed. Triangles, because that is the shape a
+    // 7x7 domain takes — its edges follow the substrate's own directions — and
+    // `flip` turns one the other way up, which is what an island on the next
+    // terrace down looks like.
+    const ISLANDS = [
+      {x: 0.24, y: 0.24, cells: 4},
+      {x: 0.30, y: 0.70, cells: 5.5},
+      {x: 0.76, y: 0.34, cells: 4, flip: true}
+    ]
+  </script>
+  <script id="8" type="text/x-typescript">
+    const cellSize = Math.hypot(si111.a1[0], si111.a1[1])
+  </script>
+
+  <!-- Controls -->
+  <script id="9" type="text/x-typescript">
+    // The floor is where the beam's own spots spread as far as the gap between
+    // the fractional ones; the widget lets you go below it, because watching the
+    // measure fail is the point of having the slider at all.
+    const beamInput = Inputs.range([6, 30], {
+      value: 11, step: 0.5, label: "beam width σ (Å)"
+    })
+  </script>
+  <script id="10" type="text/x-typescript">
+    const doseInput = Inputs.select([1e3, 1e4, 1e5, 1e6, 1e7, Infinity], {
+      value: 1e6, label: "dose (e⁻/pattern)",
+      format: (d) => (Number.isFinite(d) ? d.toExponential(0) : "noiseless")
+    })
+  </script>
+  <script id="11" type="text/x-typescript">
+    const scanInput = Inputs.select([24, 32, 48, 64], {value: 48, label: "scan points"})
+  </script>
+  <script id="12" type="text/x-typescript">
+    const playButton = toggleButton({on: "⏸ pause", off: "▶ play", value: false})
+  </script>
+  <script id="13" type="text/x-typescript">
+    // Read directly rather than through a reactive cell: a `Generators.input`
+    // value arrives a tick after the button changes, which is long enough for a
+    // reset to run itself while the button still says stopped.
+    const isRunning = () => playButton.value
+  </script>
+  <script id="14" type="text/x-typescript">
+    const resetButton = (() => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "em-toggle";
+      ensureStyles(button);
+      const label = document.createElement("span");
+      label.textContent = "↺ reset";
+      button.appendChild(label);
+      button.addEventListener("click", () => (pending.reset = true));
+      return button;
+    })()
+  </script>
+  <script id="16" type="text/x-typescript">
+    // Built once, from elements rather than from values, so that nothing is
+    // re-parented while a slider is being dragged.
+    const controlPanel = (() => {
+      const node = gridControls(htl.html`<div></div>`, {columns: 3, compact: true});
+      const place = (element, column) => {
+        const cell = htl.html`<div style="min-width:0;">${element}</div>`;
+        cell.style.gridColumn = column;
+        node.append(cell);
+        return cell;
+      };
+      place(beamInput, "1");
+      place(doseInput, "2");
+      place(scanInput, "3");
+      place(row([playButton, resetButton], {gap: 8}), "4");
+      // One row at the prose column. Measured: the dose select needs 130px, the
+      // scan select 115, and the two buttons 195; the beam slider takes what is
+      // left, which is enough for it because the kit lets a slider shrink.
+      node.style.gridTemplateColumns = "minmax(0, 1fr) 130px 115px 195px";
+      node.style.columnGap = "10px";
+      return node;
+    })()
+  </script>
+  <script id="17" type="text/x-typescript">
+    const settled = (input, quiet = 140) => Generators.observe((notify) => {
+      let last = input.value;
+      let timer;
+      const emit = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (input.value !== last) {
+            last = input.value;
+            notify(last);
+          }
+        }, quiet);
+      };
+      notify(last);
+      input.addEventListener("input", emit);
+      return () => {
+        clearTimeout(timer);
+        input.removeEventListener("input", emit);
+      };
+    })
+  </script>
+  <script id="18" type="text/x-typescript">
+    const beam = settled(beamInput)
+  </script>
+  <script id="19" type="text/x-typescript">
+    const dose = settled(doseInput)
+  </script>
+  <script id="20" type="text/x-typescript">
+    const scan = settled(scanInput)
+  </script>
+
+  <!-- The specimen, built once -->
+  <script id="21" type="text/x-typescript">
+    const surface = (() => {
+      const {n, extent, inset, escapeDepth} = field;
+      const {a1, a2} = si111;
+
+      // A cell sits down the diagonal from its origin, and its two halves sit at
+      // a third and two thirds of it. Half a cell at a time, because an island
+      // made of whole rhombi cannot end on a straight line along their diagonal,
+      // and the DAS model is already built from the two triangular halves.
+      const diagonal = [a1[0] + a2[0], a1[1] + a2[1]];
+      const halfCentre = [
+        [diagonal[0] / 3, diagonal[1] / 3],
+        [(2 * diagonal[0]) / 3, (2 * diagonal[1]) / 3]
+      ];
+      const toField = (fraction) => extent * (inset + fraction * (1 - 2 * inset));
+      const triangles = ISLANDS.map((island) => {
+        const cx = toField(island.x);
+        const cy = toField(island.y);
+        const radius = (island.cells * cellSize) / Math.sqrt(3);
+        const turn = island.flip ? 0 : Math.PI / 3;
+        return [0, 1, 2].map((k) => {
+          const angle = turn + (2 * Math.PI * k) / 3;
+          return [cx + radius * Math.cos(angle), cy + radius * Math.sin(angle)];
+        });
+      });
+      const inside = (vertices, x, y) => {
+        let sign = 0;
+        for (let k = 0; k < 3; k++) {
+          const [ax, ay] = vertices[k];
+          const [bx, by] = vertices[(k + 1) % 3];
+          const cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
+          if (k === 0) sign = Math.sign(cross);
+          else if (Math.sign(cross) !== sign) return false;
+        }
+        return true;
+      };
+      const reconstructed = (origin, which) => triangles.some((t) =>
+        inside(t, origin.x + halfCentre[which][0], origin.y + halfCentre[which][1]));
+
+      const atoms = [];
+      let reconstructedHalves = 0;
+      let halves = 0;
+      for (const origin of latticeOrigins(a1, a2, extent, 40)) {
+        for (const which of [0, 1]) {
+          const on = reconstructed(origin, which);
+          const centre = [origin.x + halfCentre[which][0], origin.y + halfCentre[which][1]];
+          const lo = extent * inset;
+          const hi = extent * (1 - inset);
+          if (centre[0] >= lo && centre[0] < hi && centre[1] >= lo && centre[1] < hi) {
+            halves += 1;
+            if (on) reconstructedHalves += 1;
+          }
+          for (const atom of on ? si111.das : si111.bulk) {
+            if (atom[3] !== which) continue;
+            const x = origin.x + atom[0];
+            const y = origin.y + atom[1];
+            if (x < -4 || x > extent + 4 || y < -4 || y > extent + 4) continue;
+            atoms.push([x, y, atom[2]]);
+          }
+        }
+      }
+
+      const {b1, b2} = reciprocalVectors(a1, a2);
+      return {
+        atoms,
+        density: splatAtoms({n, extent, atoms, escapeDepth}),
+        spots: superstructureSpots(b1, b2, {multiple: 7}),
+        substrateSpacing: 7 * Math.hypot(b1[0], b1[1]),
+        coverage: reconstructedHalves / Math.max(1, halves)
+      };
+    })()
+  </script>
+
+  <!-- The scan -->
+  <script id="22" type="text/x-typescript">
+    const scanStep = (field.extent * (1 - 2 * field.inset)) / (scan - 1)
+  </script>
+  <script id="23" type="text/x-typescript">
+    const scanOrigin = field.extent * field.inset
+  </script>
+  <script id="24" type="text/x-typescript">
+    // A fresh map whenever the measurement changes — a different beam, dose or
+    // scan grid is a different experiment, and leaving the old map up while the
+    // new one paints over it would mix the two.
+    const measurement = (() => {
+      beam;
+      dose;
+      const random = mulberry32(11);
+      return {
+        map: new Float64Array(scan * scan),
+        seen: new Uint8Array(scan * scan),
+        scratch: complex(field.patch * field.patch),
+        pattern: new Float64Array(field.patch * field.patch),
+        display: new Float64Array(field.patch * field.patch),
+        random,
+        cursor: 0,
+        at: (scan >> 1) * scan + (scan >> 1),
+        owed: 0,
+        done: false,
+        shown: false
+      };
+    })()
+  </script>
+  <script id="25" type="text/x-typescript">
+    // What the reader has asked for, waiting for the next frame to act on it.
+    // Deliberately a cell with no dependencies, so the handlers below are
+    // attached once rather than once per parameter change.
+    const pending = ({at: null, reset: false})
+  </script>
+
+  <!-- Layout -->
+  <script id="26" type="text/x-typescript">
+    const panelSize = Math.max(150, Math.min(240, Math.floor((width - 2 * 16) / 3)))
+  </script>
+  <script id="27" type="text/x-typescript">
+    // Not `view`: that is an Observable builtin, and a cell named after it is
+    // silently undefined everywhere it is read.
+    const panelRow = panels([
+      {label: "surface under the beam", width: panelSize, height: panelSize},
+      {label: "diffraction pattern", width: panelSize, height: panelSize},
+      {label: "fractional-spot share", width: panelSize, height: panelSize, cursor: "crosshair"}
+    ])
+  </script>
+  <script id="28" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="29" type="text/x-typescript">
+    const visible = whenVisible(panelRow.node)
+  </script>
+  <script id="30" type="text/x-typescript">
+    // Hovering the map moves the beam. The handler records a fraction of the
+    // panel rather than a scan position, so it does not depend on the scan grid
+    // and is attached exactly once.
+    const picking = (() => {
+      const canvas = panelRow.panels[2].canvas;
+      const pick = (event) => {
+        if (isRunning()) return;
+        const rect = canvas.getBoundingClientRect();
+        pending.at = {
+          x: (event.clientX - rect.left) / rect.width,
+          y: (event.clientY - rect.top) / rect.height
+        };
+      };
+      canvas.addEventListener("pointermove", pick);
+      canvas.addEventListener("pointerdown", pick);   // touch has no hover
+      return true;
+    })()
+  </script>
+
+  <!-- The loop -->
+  <script id="31" type="text/x-typescript" pinned="">
+    const frame = (function* () {
+      const {n, extent, patch} = field;
+      const [surfacePanel, patternPanel, mapPanel] = panelRow.panels;
+      const budget = qualityBudget({min: 1, max: 24, slowMs: 16, fastMs: 9});
+      // Positions per second. A count per frame is not a speed, and left to the
+      // budget this covered the whole field in about a second — fast enough that
+      // the marker strobed rather than moved. At this rate the default scan takes
+      // about twenty seconds, which is long enough to watch the map arrive.
+      const RATE = 110;
+      let owed = 0;
+      let last = performance.now();
+      const patternCanvas = makeCanvas(panelSize, panelSize).canvas;
+      const collect = {radius: 1.5, background: 3};
+
+      // Two and a half cells across the surface panel: enough for the corner
+      // holes and the whole adatom array, and enough room around the beam to see
+      // that it is smaller than the field it stands in.
+      const zoomHalf = 1.25 * cellSize;
+      const LAYERS = ["#0f3956", "#567269", "#bca36b"];
+      const depths = [...new Set(surface.atoms.map((a) => a[2]))].sort((a, b) => b - a);
+
+      const positionOf = (index) => ({
+        x: scanOrigin + ((index / scan) | 0) * scanStep,
+        y: scanOrigin + (index % scan) * scanStep
+      });
+
+      const measure = (index, record = true) => {
+        const m = measurement;
+        const {x, y} = positionOf(index);
+        const {pattern, n: pn, extent: pextent} = illuminatedPattern({
+          density: surface.density, n, extent, x, y, sigma: beam, patch
+        }, m.scratch, m.pattern);
+
+        // Counted, not computed, unless the dose is infinite. The normalisation
+        // is per pattern: the total is one, so `dose` is the number of electrons
+        // that arrive, whatever the beam's width.
+        let counted = pattern;
+        if (Number.isFinite(dose)) {
+          let total = 0;
+          for (let i = 0; i < pattern.length; i++) total += pattern[i];
+          for (let i = 0; i < pattern.length; i++) pattern[i] /= total || 1;
+          counted = applyShotNoise(pattern, dose, m.random);
+          m.pattern.set(counted);
+        }
+
+        const fractional = spotSum(counted, pn, pextent, surface.spots.fractional, collect);
+        const integer = spotSum(counted, pn, pextent, surface.spots.integer, collect);
+        const total = fractional + integer;
+        if (record) {
+          m.map[index] = total > 0 ? fractional / total : 0;
+          m.seen[index] = 1;
+        }
+        m.at = index;
+        m.shown = true;
+      };
+
+      const reset = () => {
+        const m = measurement;
+        m.map.fill(0);
+        m.seen.fill(0);
+        m.cursor = 0;
+        m.owed = 0;
+        m.done = false;
+        m.at = (scan >> 1) * scan + (scan >> 1);
+        measure(m.at);
+        if (playButton.value) {
+          playButton.value = false;
+          playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+        }
+      };
+
+      const positionFrom = ({x, y}) => {
+        if (x < 0 || x >= 1 || y < 0 || y >= 1) return null;
+        const row = Math.min(scan - 1, Math.floor(y * scan));
+        const col = Math.min(scan - 1, Math.floor(x * scan));
+        return row * scan + col;
+      };
+
+      // ---- drawing ----------------------------------------------------------
+      const drawSurface = () => {
+        const {ctx} = surfacePanel;
+        const centre = positionOf(measurement.at);
+        const scale = panelSize / (2 * zoomHalf);
+        ctx.clearRect(0, 0, panelSize, panelSize);
+        ctx.fillStyle = "#05070a";
+        ctx.fillRect(0, 0, panelSize, panelSize);
+        for (const atom of surface.atoms) {
+          const dx = atom[0] - centre.x;
+          const dy = atom[1] - centre.y;
+          if (Math.abs(dx) > zoomHalf + 2 || Math.abs(dy) > zoomHalf + 2) continue;
+          const level = Math.max(0, depths.indexOf(atom[2]));
+          ctx.fillStyle = LAYERS[Math.min(level, LAYERS.length - 1)];
+          ctx.beginPath();
+          ctx.arc((dy + zoomHalf) * scale, (dx + zoomHalf) * scale,
+            scale * (0.9 + 0.35 * level), 0, 2 * Math.PI);
+          ctx.fill();
+        }
+        // The beam, at the width it actually has.
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = Math.max(1, scale * 0.12);
+        ctx.setLineDash([scale * 0.9, scale * 0.9]);
+        ctx.beginPath();
+        ctx.arc(zoomHalf * scale, zoomHalf * scale, beam * scale, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.restore();
+        drawScalebar(ctx, {
+          extent: 2 * zoomHalf, box: [panelSize, panelSize], corner: "bottom-left",
+          length: niceScalebarLength(2 * zoomHalf, 0.3)
+        });
+      };
+
+      // A diffraction pattern runs over several decades and its brightest pixel
+      // is the direct beam, so a percentile stretch gives a white dot on black.
+      // Scale to the peak and take the log against a fixed floor instead.
+      const DECADES = 1e5;
+      const ceiling = Math.log1p(DECADES);
+      const logMap = (source, out, count) => {
+        let peak = 0;
+        for (let i = 0; i < count; i++) if (source[i] > peak) peak = source[i];
+        const scale = peak > 0 ? DECADES / peak : 0;
+        for (let i = 0; i < count; i++) out[i] = Math.log1p(scale * source[i]);
+        return out;
+      };
+
+      const patternExtent = patch * (extent / n);
+      const crop = Math.min(patch, Math.round(patch * 0.78));
+
+      const drawPattern = () => {
+        const m = measurement;
+        const {ctx} = patternPanel;
+        if (!m.shown) {
+          ctx.clearRect(0, 0, panelSize, panelSize);
+          ctx.fillStyle = "#05070a";
+          ctx.fillRect(0, 0, panelSize, panelSize);
+          return;
+        }
+        const cropped = cropCenter(
+          fftshift(logMap(m.pattern, m.display, patch * patch), patch, patch),
+          patch, patch, crop);
+        blit(patternCanvas,
+          applyColormap(cropped.data, {colormap: "magma", vmin: 0, vmax: ceiling}),
+          cropped.nx, cropped.ny, {size: panelSize});
+        ctx.clearRect(0, 0, panelSize, panelSize);
+        ctx.drawImage(patternCanvas, 0, 0, panelSize, panelSize);
+
+        // Which spots are being counted, drawn where they are counted. The two
+        // families are what the measure compares, so they are what the panel has
+        // to show; without them the reader is looking at a pattern and taking the
+        // number on trust.
+        const scale = panelSize / (crop / patternExtent);
+        const mark = (spots, colour) => {
+          ctx.save();
+          ctx.strokeStyle = colour;
+          ctx.lineWidth = 1;
+          for (const q of spots) {
+            const px = panelSize / 2 + q[1] * scale;
+            const py = panelSize / 2 + q[0] * scale;
+            if (px < 0 || px > panelSize || py < 0 || py > panelSize) continue;
+            ctx.beginPath();
+            ctx.arc(px, py, Math.max(2.5, (collect.radius * panelSize) / crop), 0, 2 * Math.PI);
+            ctx.stroke();
+          }
+          ctx.restore();
+        };
+        mark(surface.spots.fractional, "rgba(255,255,255,0.16)");
+        mark(surface.spots.integer, withAlpha(UI.accent, 0.9));
+      };
+
+      const drawMap = () => {
+        const m = measurement;
+        const rgba = applyColormap(m.map, {colormap: "eclipse", vmin: 0, vmax: 1.2});
+        for (let i = 0; i < m.seen.length; i++) {
+          if (m.seen[i]) continue;
+          rgba[4 * i] = 128;
+          rgba[4 * i + 1] = 128;
+          rgba[4 * i + 2] = 128;
+        }
+        const ctx = blit(mapPanel.canvas, rgba, scan, scan, {size: panelSize, smooth: false});
+        const scale = ctx.canvas.width / scan;
+        const cx = ((m.at % scan) + 0.5) * scale;
+        const cy = (((m.at / scan) | 0) + 0.5) * scale;
+        const radius = Math.max(3, (beam / scanStep) * scale);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+        ctx.lineWidth = Math.max(2, radius * 0.12);
+        ctx.strokeStyle = "rgba(0,0,0,0.55)";
+        ctx.stroke();
+        ctx.lineWidth = Math.max(1, radius * 0.06);
+        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.stroke();
+        ctx.restore();
+        drawScalebar(ctx, {
+          extent: scan * scanStep, corner: "bottom-left",
+          length: niceScalebarLength(scan * scanStep, 0.3)
+        });
+      };
+
+      const spotsPerBeam = surface.substrateSpacing / 7 / (1 / (2 * Math.PI * beam));
+
+      const describe = () => {
+        const m = measurement;
+        let seen = 0;
+        for (let i = 0; i < m.seen.length; i++) seen += m.seen[i];
+        return `σ = ${beam.toFixed(1)} Å · spots ${spotsPerBeam.toFixed(1)}× their own width apart` +
+          ` · ${(100 * surface.coverage).toFixed(0)}% reconstructed` +
+          ` · ${Number.isFinite(dose) ? `${dose.toExponential(0)} e⁻ per pattern` : "noiseless"}` +
+          ` · ${scan}×${scan} at ${scanStep.toFixed(1)} Å` +
+          (m.done
+            ? " · scan complete"
+            : isRunning()
+              ? ` · ${(100 * seen / m.map.length).toFixed(0)}% scanned`
+              : seen > 1 ? "" : " · hover the map or press play");
+      };
+
+      if (!measurement.shown) measure(measurement.at);
+
+      for (const tick of frames({fps: 30, playing: visible})) {
+        const started = performance.now();
+        if (pending.reset) {
+          pending.reset = false;
+          pending.at = null;
+          reset();
+        }
+
+        const elapsed = Math.min(0.25, (started - last) / 1000);
+        last = started;
+
+        if (isRunning()) {
+          const m = measurement;
+          if (m.done) {
+            m.cursor = 0;
+            m.done = false;
+          }
+          owed = Math.min(owed + elapsed * RATE, Math.max(1, budget.value));
+          const steps = Math.floor(owed);
+          owed -= steps;
+          for (let s = 0; s < steps && !m.done; s++) {
+            measure(m.cursor);
+            m.cursor += 1;
+            if (m.cursor >= m.map.length) {
+              m.cursor = 0;
+              m.done = true;
+            }
+          }
+        } else if (pending.at) {
+          const index = positionFrom(pending.at);
+          if (index !== null && index !== measurement.at) measure(index, false);
+        }
+
+        budget.report(performance.now() - started);
+        drawSurface();
+        drawPattern();
+        drawMap();
+        readout.textContent = describe();
+        yield tick;
+      }
+    })()
+  </script>
+</notebook>

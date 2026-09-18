@@ -306,13 +306,11 @@
       const left = column([kindFields, lensFields], {align: "stretch"});
       // The control column stretches when it ends up on a line of its own.
       //
-      // `.em-row` wraps, and below about 1000px the figure no longer fits
-      // beside a 240px column — so the controls drop underneath it and, pinned
-      // at 240, sat as a narrow strip with the rest of the line empty beside
-      // them. A lens radio whose two options are 400px of text then wrapped as
-      // well. `flex: 1 1 240px` keeps them 240 wide or wider next to the
-      // figure, and gives them the whole line when they are on one, and the
-      // slider forms spread into however many columns that turns out to be.
+      // `.em-row` wraps, so a column pinned at 240 that ends up alone on a line
+      // sits as a narrow strip with the rest of the line empty beside it.
+      // `flex: 1 1 240px` keeps it 240 wide or wider next to the figure, and
+      // gives it the whole line when it is on one, and the slider forms spread
+      // into however many columns that turns out to be.
       left.style.flex = "1 1 240px";
       left.style.minWidth = "240px";
       for (const form of [lensFields]) {
@@ -320,6 +318,12 @@
       }
       const right = column([legend, plotHost], {align: "stretch"});
       right.style.flex = "0 0 auto";
+      // Capped at the figure's own width. Without this the legend — a flex row
+      // whose natural width is the sum of its entries — makes the column wider
+      // than the thing it labels, and the pair no longer fits the prose column
+      // side by side: the controls wrap onto a line of their own at 668px, which
+      // is exactly where they should not. Capped, the legend wraps instead.
+      right.style.maxWidth = `${plotWidth}px`;
       return row([left, right]);
     })()
   </script>

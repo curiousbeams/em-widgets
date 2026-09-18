@@ -18,7 +18,7 @@ tools/                    fixture generation + npy -> zarr.zip conversion
 demo/                     a throwaway MyST project for checking the real render
 ```
 
-Fifteen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
+Seventeen widgets so far: `sem-ray-diagram`, `geometric-aberrations`,
 `aperture-autocorrelation`, `probe-aberrations`, `stem-measurements`,
 `stem-experiment` — a scanning 4D-STEM instrument whose multislice is checked
 against abtem to ~1e-6 — `paraxial-rays`, which integrates a real lens field to
@@ -32,7 +32,11 @@ overlap function every direct phase-retrieval method is built on, and
 `direct-ptychography`, which runs SSB, OBF, parallax and iCOM through one
 pipeline where only the kernel changes, `iterative-ptychography`, which
 draws ePIE as the closed loop it is and lets you take one scan position at a
-time, and `research-overview`, a row of three square thumbnails that run
+time, `surface-diffraction`, which scans a focused beam across an Si(111)
+surface and maps where it has reconstructed from the fractional spots in the
+pattern, `ptycho-tomography`, which measures a three-dimensional specimen with a
+ptychographic scan at every tilt and reconstructs the series one projection at a
+time or all at once, and `research-overview`, a row of three square thumbnails that run
 themselves and hand over to the pointer on hover — the landing-page form of
 three of the others.
 
@@ -267,7 +271,8 @@ duplicated across the lab's Python notebooks.
 | `projections.js` | `generalisedProjection`, `productProjection`, `namedParameters` (AP/DM/RRR/RAAR), `line`, `polarCurve`, `iteration`, `residual` |
 | `ptycho.js` | `overlapFunction` and `overlapFunctionAtQ` (the two slices of Γ), `overlapRegions`, `overlapSums`, `parallaxShifts`, `tileSpectrum`, `directAccumulator`/`accumulatePixel`/`directImage`, `directCTF`, `directSSNR` |
 | `ptycho-sim.js` | `measurePosition`, `forwardModel` (resumable; a detector subset and either data layout), `scanSpectra` |
-| `epie.js` | `epieState` (complex or potential object, with positivity), `epieStep` (one position, object and probe), `epieReset`, `reconstructedPhase`, `scanOrder`, `probeDiameter`, `centreSpectrum` |
+| `epie.js` | `epieState` (complex or potential object, with positivity), `epieStep` (one position, object and probe), `epieReset`, `reconstructedPhase`, `scanOrder`, `probeDiameter`, `centreSpectrum`, `epieLine` (the same step in one dimension) |
+| `tomo.js` | `projectVolume`, `backProject` (its exact transpose, which the tests pin), `tiltSeries` |
 | `raytrace.js` | `transferMatrix`, `traceRays`, `traceParallel`, `traceFrom`, `COLUMNS`/`buildColumn`, `reverseColumn`, `findCrossovers`/`findPlanes`, `pairedSeparationAt` |
 | `surface.js` | `reciprocalVectors`, `latticeOrigins`, `splatAtoms` (depth-weighted, so it is a surface measurement), `beamWindow`, `diffractionPattern`, `superstructureSpots`, `spotSum` (with the local background subtracted) |
 | `data.js` | `openZarrZip`, `readAll`, `readSlice` — **not** re-exported from `index.js`, so widgets that use no data never load zarrita |

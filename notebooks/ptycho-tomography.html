@@ -1,0 +1,928 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Joint ptychographic tomography</title>
+  <script id="1" type="text/markdown">
+    # Joint ptychographic tomography
+  </script>
+  <script id="2" type="text/markdown">
+    A ptychographic reconstruction recovers the specimen's potential projected
+    along one direction. Recovering it in three dimensions takes many directions,
+    so the experiment is a tilt series: at every angle a scan, and from every
+    scan a projection.
+
+    Everything here is computed in your browser. The specimen is a patch of
+    membrane with proteins in it, on a ${tex`32^3`} grid eighty Angstroms across:
+    a curved bilayer, four proteins crossing it and one sitting on it. At each
+    tilt it is projected to an image, that image is measured by a scanning
+    ptychographic experiment at the dose you choose — sixty-four probe positions,
+    a full diffraction pattern at each — and the measurement is inverted with the
+    same ePIE the [iterative ptychography](./iterative-ptychography.html) widget
+    runs. The tilt series is then assembled into the volume by back-projection.
+
+    **The two modes differ in one place.** A measurement of
+    ${tex`\left|\mathcal{F}[e^{i\varphi}P]\right|`} cannot see a constant added
+    to ${tex`\varphi`}: it multiplies the exit wave by a constant phase factor,
+    and the detector records modulus. Every projection therefore comes back
+    correct in shape and floating in height.
+
+**Sequential** is the usual pipeline: two-dimensional ptychography at each
+    tilt, then three-dimensional tomography on the images it produces. Each
+    projection is solved from its own flat start and settles on its own offset,
+    so the tilt series is inconsistent before the tomography begins.
+    Back-projection spreads those offsets through the volume, and no number of
+    passes removes them.
+
+    **Joint** solves for the volume and its projections together: each projection
+    starts from what the current volume says it should be, so the offset it
+    inherits is the one the rest of the tilt series already agrees on. The same
+    measurements, the same ePIE, and the only difference is where each
+    reconstruction starts.
+
+    **The tilt range is the missing wedge.** A stage that cannot reach ninety
+    degrees leaves a cone of spatial frequencies unmeasured, and the direction it
+    takes out is the one along the beam — which is why a membrane lying across
+    the beam is the first thing to smear. It is worth finding out what the two
+    modes do about that, because the answer is not the obvious one: measured here,
+    at the full range the joint solve ends at 38% of the specimen's rms against
+    the sequential 53%, and at ±60° the two are level at about 75%. What the joint
+    solve fixes is the offsets; once the wedge is the larger error, both are
+    limited by what was never recorded, and this way of coupling them has nothing
+    left to add.
+
+    **Press play**, and **drag either scene** to turn both. The specimen is drawn
+    as a surface, coloured by what each part of it is — the bilayer in blue, the
+    protein in it in tan — because it is a thing we built and its edges are known.
+    The reconstruction is drawn as the volume it is, a dot at every voxel above a
+    threshold: an isosurface around it would be a decision about where the object
+    ends, and that decision is segmentation rather than reconstruction. The dashed
+    line is where the beam runs at the tilt being measured, and the middle panel
+    is one of the sixty-four patterns that tilt records, cycling through them.
+
+    The number in the readout is measured after removing the mean, because a
+    constant is undetermined for the whole object too, and that part belongs to
+    the measurement rather than to the algorithm.
+
+    Two things this does not do. Each tilt is one projected potential rather than
+    a multislice through the specimen, so it is thin at every angle; and the
+    coupling between the volume and its projections is the alternating one
+    described above rather than a single gradient descent from the diffraction
+    patterns to the voxels.
+  </script>
+
+  <script id="3" type="text/x-typescript">
+    const controlsView = display(controlPanel);
+  </script>
+  <script id="3b" type="text/x-typescript">
+    const tomographyView = display(panelRow.node);
+  </script>
+  <script id="3c" type="text/x-typescript">
+    const readoutView = display(readout);
+  </script>
+
+  <script id="4" type="text/x-typescript">
+    import {
+      electronWavelength, complexProbe, ifft2, applyColormap, blit, mulberry32,
+      drawScalebar, niceScalebarLength, histogramScaling,
+      panels, controls as gridControls, badge, row, toggleButton, ensureStyles, makeCanvas,
+      frames, whenVisible, qualityBudget,
+      forwardModel, epieState, epieStep, epieReset, reconstructedPhase,
+      projectVolume, backProject, tiltSeries, fftshift, cropCenter,
+      makeView, project, drawSpheres, depthSort, trackball, quatToMatrix, applyMatrix,
+      currentColor, withAlpha, UI
+    } from "https://curiousbeams.github.io/em-widgets/kit/index.js"
+  </script>
+
+  <!-- Geometry -->
+  <script id="5" type="text/x-typescript">
+    const n = 64
+  </script>
+  <script id="6" type="text/x-typescript">
+    const m = 8                       // scan positions per side, so 64 per tilt
+  </script>
+  <script id="7" type="text/x-typescript">
+    // Sixty nanometres across, which is what it takes to hold a population of
+    // membrane proteins rather than a couple of them: at the packing these
+    // sit at, a field this wide holds about fifteen.
+    const extent = 600                // Angstrom across the projection
+  </script>
+  <script id="8" type="text/x-typescript">
+    const energy = 300e3
+  </script>
+  <script id="9" type="text/x-typescript">
+    const optics = (() => {
+      const wavelength = electronWavelength(energy);
+      const sampling = [extent / n, extent / n];
+      const radiusPixels = 14;
+      const semiangle = radiusPixels * (1 / extent) * wavelength * 1e3;
+      // The defocus that makes the probe about sixteen pixels — sixty Angstrom —
+      // across, which overlaps its neighbour at this scan step.
+      const C10 = -(16 * extent * extent) / (2 * radiusPixels * wavelength * n);
+      const spectrum = complexProbe({
+        gpts: [n, n], sampling, energy, semiangleCutoff: semiangle, aberrations: {C10}
+      });
+      const probe = ifft2(
+        {re: Float64Array.from(spectrum.re), im: Float64Array.from(spectrum.im)}, n, n);
+      return {wavelength, sampling, semiangle, probe};
+    })()
+  </script>
+
+  <!-- Projection, and its transpose, one slice at a time -->
+  <script id="10" type="text/x-typescript">
+    // The tilt axis is the second index, so every row of a projection is the
+    // projection of one slice — and the two-dimensional transform pair in
+    // `kit/tomo.js` does the whole job, once per row.
+    const projectStack = (() => {
+      const slice = new Float64Array(n * n);
+      const line = new Float64Array(n);
+      return (volume, theta, out) => {
+        for (let iy = 0; iy < n; iy++) {
+          for (let ix = 0; ix < n; ix++) {
+            for (let iz = 0; iz < n; iz++) slice[ix * n + iz] = volume[(ix * n + iy) * n + iz];
+          }
+          projectVolume(slice, n, theta, line);
+          for (let d = 0; d < n; d++) out[d * n + iy] = line[d];
+        }
+        return out;
+      };
+    })()
+  </script>
+  <script id="11" type="text/x-typescript">
+    const backProjectStack = (() => {
+      const slice = new Float64Array(n * n);
+      const line = new Float64Array(n);
+      return (image, theta, volume, scale) => {
+        for (let iy = 0; iy < n; iy++) {
+          for (let d = 0; d < n; d++) line[d] = image[d * n + iy];
+          slice.fill(0);
+          backProject(line, n, theta, slice, scale);
+          for (let ix = 0; ix < n; ix++) {
+            for (let iz = 0; iz < n; iz++) volume[(ix * n + iy) * n + iz] += slice[ix * n + iz];
+          }
+        }
+      };
+    })()
+  </script>
+
+  <!-- The specimen -->
+  <script id="12" type="text/x-typescript">
+    // A piece of cell, on an n x n x n grid twenty-four nanometres across:
+    // a curved bilayer with proteins through it and on it, a filament running
+    // past, and a couple of complexes in the space above.
+    //
+    // Every voxel is labelled with what put it there, which the specimen panel
+    // draws in colour. The reconstruction has no labels — knowing what is what
+    // is segmentation, and that is a separate problem from recovering it.
+    //
+    // Scaled so its projections peak at about a radian: the measurement sees
+    // exp(i phi) and nothing else, so a projection that winds through several
+    // turns cannot be followed from a flat start.
+    const LABELS = ([
+      null,
+      [96, 156, 214],                  // 1: the bilayer
+      [232, 172, 100]                  // 2: the protein in it
+    ])
+  </script>
+  <script id="12b" type="text/x-typescript">
+    const specimen = (() => {
+      const volume = new Float64Array(n * n * n);
+      const labels = new Uint8Array(n * n * n);
+      const centre = (n - 1) / 2;
+      const scale = extent / n;                    // Angstrom per voxel
+      const random = mulberry32(31);
+      const between = (lo, hi) => lo + (hi - lo) * random();
+
+      // A piece of membrane, curved as a vesicle of about a hundred nanometres
+      // across, with one protein in it many times over. The protein is a stalked
+      // one — an anchor in the bilayer, a stem, and a head above it — which is
+      // what a spike or an integrin looks like at the resolution a tilt series
+      // of this kind reaches.
+      const membrane = {radius: 900, thickness: 46, leaflet: 10, density: 0.55};
+      const surfaceAt = (x, y) => (x * x + y * y) / (2 * membrane.radius) - 40;
+
+      // Where they sit: a jittered grid, so the packing is even without being a
+      // lattice. About sixteen nanometres apart, at the sparse end of what these
+      // membranes carry.
+      const spacing = 160;
+      const sites = [];
+      const across = Math.round(extent / spacing);
+      for (let i = -across; i <= across; i++) {
+        for (let j = -across; j <= across; j++) {
+          const x = i * spacing + between(-0.3, 0.3) * spacing;
+          const y = j * spacing + between(-0.3, 0.3) * spacing;
+          if (Math.abs(x) > extent * 0.44 || Math.abs(y) > extent * 0.44) continue;
+          sites.push([x, y]);
+        }
+      }
+
+      const pieces = [];
+      for (const [x, y] of sites) {
+        const mid = surfaceAt(x, y);
+        // The local normal of the curved surface, with a few degrees of wobble:
+        // a protein stands up from the membrane it is in, not from the page.
+        const normal = [-x / membrane.radius, -y / membrane.radius, 1];
+        const wobble = [between(-0.18, 0.18), between(-0.18, 0.18), 0];
+        const axis = normal.map((v, k) => v + wobble[k]);
+        const length = Math.hypot(...axis);
+        const unit = axis.map((v) => v / length);
+        const along = (t) => [x + unit[0] * t, y + unit[1] * t, mid + unit[2] * t];
+
+        // The anchor, inside the bilayer.
+        const [ax, ay, az] = along(0);
+        pieces.push({x: ax, y: ay, z: az, radius: 15, value: 0.8, label: 2});
+        // The stem.
+        for (const t of [26, 44, 62]) {
+          const [sx, sy, sz] = along(t);
+          pieces.push({x: sx, y: sy, z: sz, radius: 11, value: 0.85, label: 2});
+        }
+        // And the head, as three lobes, which is what stops it reading as a ball
+        // on a stick.
+        const [hx, hy, hz] = along(88);
+        for (let k = 0; k < 3; k++) {
+          const phi = (2 * Math.PI * k) / 3 + between(0, 1);
+          pieces.push({
+            x: hx + 15 * Math.cos(phi), y: hy + 15 * Math.sin(phi), z: hz + between(-6, 6),
+            radius: 19, value: 1.0, label: 2
+          });
+        }
+      }
+
+      // Built by walking the pieces and splatting each one into the grid it
+      // reaches, rather than by asking every voxel about every piece. The second
+      // way is a hundred and twenty questions per voxel and seconds of load.
+      const build = (size) => {
+        const grid = new Float64Array(size * size * size);
+        const marks = new Uint8Array(size * size * size);
+        const step = extent / size;
+        const middle = (size - 1) / 2;
+        const mark = (at, value, label) => {
+          grid[at] += value;
+          // The label of whichever piece contributed most here, which is what
+          // the surface is coloured by.
+          if (value > 0.001 && (marks[at] === 0 || value > grid[at] / 2)) marks[at] = label;
+        };
+        // The membrane spans everything, so it is the one thing evaluated at
+        // every voxel.
+        for (let ix = 0; ix < size; ix++) {
+          for (let iy = 0; iy < size; iy++) {
+            const x = (ix - middle) * step;
+            const y = (iy - middle) * step;
+            const mid = surfaceAt(x, y);
+            for (let iz = 0; iz < size; iz++) {
+              const z = (iz - middle) * step;
+              let value = 0;
+              for (const side of [-1, 1]) {
+                const d = z - (mid + (side * membrane.thickness) / 2);
+                value += membrane.density * Math.exp(-(d * d) / (2 * membrane.leaflet ** 2));
+              }
+              if (value <= 0) continue;
+              const at = (ix * size + iy) * size + iz;
+              grid[at] += value;
+              marks[at] = 1;
+            }
+          }
+        }
+        for (const piece of pieces) {
+          const reach = Math.ceil((3 * piece.radius) / step);
+          const cx = piece.x / step + middle;
+          const cy = piece.y / step + middle;
+          const cz = piece.z / step + middle;
+          for (let ix = Math.max(0, Math.round(cx) - reach);
+               ix <= Math.min(size - 1, Math.round(cx) + reach); ix++) {
+            const dx = (ix - cx) * step;
+            for (let iy = Math.max(0, Math.round(cy) - reach);
+                 iy <= Math.min(size - 1, Math.round(cy) + reach); iy++) {
+              const dy = (iy - cy) * step;
+              for (let iz = Math.max(0, Math.round(cz) - reach);
+                   iz <= Math.min(size - 1, Math.round(cz) + reach); iz++) {
+                const dz = (iz - cz) * step;
+                const r2 = dx * dx + dy * dy + dz * dz;
+                if (r2 > 9 * piece.radius * piece.radius) continue;
+                mark((ix * size + iy) * size + iz,
+                  piece.value * Math.exp(-r2 / (2 * piece.radius ** 2)), piece.label);
+              }
+            }
+          }
+        }
+        return {grid, marks, step};
+      };
+
+      const coarse = build(n);
+      volume.set(coarse.grid);
+      labels.set(coarse.marks);
+
+      // And again, twice as fine, for the panel only: the stems of these
+      // proteins are a voxel across on the grid the physics runs on, and a
+      // surface drawn from that is a row of lumps.
+      const display = build(2 * n);
+
+      const peak = Math.max(...projectStack(volume, 0.3, new Float64Array(n * n)));
+      for (let i = 0; i < volume.length; i++) volume[i] *= 1.0 / peak;
+      for (let i = 0; i < display.grid.length; i++) display.grid[i] *= 1.0 / peak;
+      return {
+        volume, labels, membrane, surfaceAt, scale, count: sites.length,
+        display: {...display, size: 2 * n}
+      };
+    })()
+  </script>
+
+  <!-- Controls -->
+  <script id="13" type="text/x-typescript">
+    const modeInput = Inputs.radio(["sequential", "joint"], {
+      value: "joint", label: "solve"
+    })
+  </script>
+  <script id="14" type="text/x-typescript">
+    const doseInput = Inputs.select([1, 3, 10, 30, Infinity], {
+      value: 3, label: "dose (e⁻/Å²)",
+      format: (d) => (Number.isFinite(d) ? `${d}` : "noiseless")
+    })
+  </script>
+  <script id="15" type="text/x-typescript">
+    const anglesInput = Inputs.select([12, 24, 36], {value: 24, label: "tilts"})
+  </script>
+  <script id="15b" type="text/x-typescript">
+    // How much of the half turn the stage can actually reach. A specimen on a
+    // grid runs out of room long before ninety degrees, and what is left over is
+    // the missing wedge.
+    const rangeInput = Inputs.select([180, 140, 120, 90], {
+      value: 180, label: "range", format: (d) => `±${d / 2}°`
+    })
+  </script>
+  <script id="16" type="text/x-typescript">
+    const playButton = toggleButton({on: "⏸ pause", off: "▶ play", value: false})
+  </script>
+  <script id="17" type="text/x-typescript">
+    const isRunning = () => playButton.value
+  </script>
+  <script id="18" type="text/x-typescript">
+    const resetButton = (() => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "em-toggle";
+      ensureStyles(button);
+      const label = document.createElement("span");
+      label.textContent = "↺ reset";
+      button.appendChild(label);
+      button.addEventListener("click", () => (pending.reset = true));
+      return button;
+    })()
+  </script>
+  <script id="19" type="text/x-typescript">
+    // One row at the prose column. Built from elements rather than values, so
+    // nothing is re-parented while a control is being used.
+    const controlPanel = (() => {
+      const node = gridControls(htl.html`<div></div>`, {columns: 5, compact: true});
+      const place = (element, column) => {
+        const cell = htl.html`<div style="min-width:0;">${element}</div>`;
+        cell.style.gridColumn = column;
+        node.append(cell);
+      };
+      place(modeInput, "1");
+      place(doseInput, "2");
+      place(anglesInput, "3");
+      place(rangeInput, "4");
+      place(row([playButton, resetButton], {gap: 8}), "5");
+      node.style.gridTemplateColumns = "minmax(0, 1fr) 95px 70px 85px 185px";
+      node.style.columnGap = "8px";
+      return node;
+    })()
+  </script>
+  <script id="20" type="text/x-typescript">
+    const settled = (input, quiet = 140) => Generators.observe((notify) => {
+      let last = input.value;
+      let timer;
+      const emit = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (input.value !== last) {
+            last = input.value;
+            notify(last);
+          }
+        }, quiet);
+      };
+      notify(last);
+      input.addEventListener("input", emit);
+      return () => {
+        clearTimeout(timer);
+        input.removeEventListener("input", emit);
+      };
+    })
+  </script>
+  <script id="21" type="text/x-typescript">
+    // Two cells, and not one. A cell whose value IS the generator is unwrapped by
+    // the runtime; a cell that compares the generator to a string compares the
+    // generator object, which is never equal to anything and never changes.
+    const mode = settled(modeInput)
+  </script>
+  <script id="21b" type="text/x-typescript">
+    const joint = mode === "joint"
+  </script>
+  <script id="22" type="text/x-typescript">
+    const dose = settled(doseInput)
+  </script>
+  <script id="23" type="text/x-typescript">
+    const angleCount = settled(anglesInput)
+  </script>
+  <script id="23b" type="text/x-typescript">
+    const range = settled(rangeInput)
+  </script>
+
+  <!-- The experiment -->
+  <script id="24" type="text/x-typescript">
+    const angles = tiltSeries(angleCount, (range * Math.PI) / 180)
+  </script>
+  <script id="25" type="text/x-typescript">
+    // The measurements, taken once and shared by both modes: they have to be
+    // compared on the same experiment. About a hundred milliseconds of work, and
+    // a few megabytes of amplitudes.
+    //
+    // `Array.from`, and not `angles.map`: `angles` is a Float64Array, and its own
+    // map coerces every array it is handed to a number.
+    const experiment = (() => {
+      const projection = new Float64Array(n * n);
+      return Array.from(angles, (theta, a) => {
+        projectStack(specimen.volume, theta, projection);
+        const model = forwardModel({
+          objectPhase: Float64Array.from(projection), probeReal: optics.probe,
+          n, m, dose, sampling: optics.sampling,
+          amplitude: true, layout: "rk", random: mulberry32(100 + a)
+        });
+        while (model.step(64) !== 0);
+        return model.data;
+      });
+    })()
+  </script>
+  <script id="26" type="text/x-typescript">
+    // A fresh reconstruction whenever the experiment or the mode changes.
+    const state = (() => {
+      experiment;
+      joint;
+      angles;
+      return {
+        volume: new Float64Array(n * n * n),
+        projections: Array.from({length: angles.length}, () => new Float64Array(n * n)),
+        solved: new Uint8Array(angles.length),
+        solver: epieState({
+          n, m, probe: optics.probe, objectType: "potential", positivity: false
+        }),
+        cursor: 0,
+        position: 0,
+        passes: 0,
+        residual: NaN,
+        error: NaN,
+        owed: 0
+      };
+    })()
+  </script>
+  <script id="27" type="text/x-typescript">
+    const pending = ({reset: false})
+  </script>
+
+  <!-- Layout -->
+  <script id="28" type="text/x-typescript">
+    const panelSize = Math.max(150, Math.min(240, Math.floor((width - 2 * 14) / 3)))
+  </script>
+  <script id="29" type="text/x-typescript">
+    // Not `view`: that is an Observable builtin, and a cell named after it is
+    // silently undefined everywhere it is read.
+    const panelRow = panels([
+      {label: "specimen · drag to turn", width: panelSize, height: panelSize, cursor: "grab"},
+      {label: "one diffraction pattern", width: panelSize, height: panelSize},
+      {label: "reconstruction · drag to turn", width: panelSize, height: panelSize, cursor: "grab"}
+    ])
+  </script>
+  <script id="30" type="text/x-typescript">
+    const readout = badge()
+  </script>
+  <script id="31" type="text/x-typescript">
+    const visible = whenVisible(panelRow.node)
+  </script>
+  <script id="31b" type="text/x-typescript">
+    // The camera, as a quaternion the two scenes share: turning either of them
+    // turns both, because the whole point is to compare them.
+    //
+    // A mutable holder rather than a reactive cell. Nothing is recomputed when
+    // the scene turns — the frame loop is already drawing — and a cell would
+    // rebuild the panels out from under the drag.
+    const viewState = ({quat: [0.86, -0.36, 0.34, 0.14]})
+  </script>
+  <script id="31c" type="text/x-typescript">
+    const turning = (() => {
+      for (const panel of [panelRow.panels[0], panelRow.panels[2]]) {
+        const canvas = panel.canvas;
+        let dragging = false;
+        let lastX = 0;
+        let lastY = 0;
+        canvas.addEventListener("pointerdown", (event) => {
+          dragging = true;
+          lastX = event.clientX;
+          lastY = event.clientY;
+          canvas.setPointerCapture(event.pointerId);
+          canvas.style.cursor = "grabbing";
+        });
+        canvas.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          viewState.quat = trackball(viewState.quat, event.clientX - lastX,
+            event.clientY - lastY, canvas.clientWidth);
+          lastX = event.clientX;
+          lastY = event.clientY;
+        });
+        const release = (event) => {
+          dragging = false;
+          canvas.style.cursor = "grab";
+          if (event.pointerId !== undefined && canvas.hasPointerCapture?.(event.pointerId)) {
+            canvas.releasePointerCapture(event.pointerId);
+          }
+        };
+        canvas.addEventListener("pointerup", release);
+        canvas.addEventListener("pointercancel", release);
+      }
+      return true;
+    })()
+  </script>
+
+  <!-- The loop -->
+  <script id="32" type="text/x-typescript" pinned="">
+    const frame = (function* () {
+      const [specimenPanel, patternPanel, estimatePanel] = panelRow.panels;
+      const budget = qualityBudget({min: 1, max: 4, slowMs: 24, fastMs: 12});
+      const projection = new Float64Array(n * n);
+      const difference = new Float64Array(n * n);
+      const phase = new Float64Array(n * n);
+      const order = Int32Array.from({length: m * m}, (_, i) => i);
+
+      // How hard each back-projection pulls. A projection sums n samples, so a
+      // volume that is wrong by d everywhere gives a projection wrong by n d, and
+      // a step of c/n moves the volume by c d. Measured: 0.3 converges in half a
+      // dozen passes over the tilt series and 1.2 diverges.
+      const relaxation = 0.3 / n;
+      const SWEEPS = 1;          // ePIE passes per visit, once the volume has a guess
+      const FIRST_SWEEPS = 8;    // and from a flat start, which is all the separate mode gets
+      const PASSES = 16;
+      // Tilts per second. A count per frame is not a speed, and a reconstruction
+      // is worth watching arrive rather than finding already finished.
+      const RATE = 14;
+
+      const solve = (index) => {
+        const theta = angles[index];
+        projectStack(state.volume, theta, projection);
+
+        // Where this projection starts from is the whole difference between the
+        // two modes. Jointly, it is what the volume says it should be, so it
+        // inherits the offset the rest of the tilt series has agreed on;
+        // separately, it starts flat and settles on one of its own.
+        epieReset(state.solver, {probe: optics.probe});
+        if (joint) {
+          state.solver.phase.set(projection);
+          for (let i = 0; i < projection.length; i++) {
+            state.solver.object.re[i] = Math.cos(projection[i]);
+            state.solver.object.im[i] = Math.sin(projection[i]);
+          }
+        }
+        const sweeps = joint ? SWEEPS : FIRST_SWEEPS;
+        let residual = NaN;
+        for (let s = 0; s < sweeps; s++) {
+          for (const position of order) {
+            residual = epieStep(state.solver, experiment[index], position,
+              {beta: 0.9, probeBeta: 0}).error;
+          }
+        }
+        reconstructedPhase(state.solver, phase);
+        state.projections[index].set(phase);
+        state.solved[index] = 1;
+        state.residual = residual;
+      };
+
+      const visit = (index) => {
+        // A separately-solved projection is solved once and then left alone:
+        // that nothing later can correct it is the point of the mode.
+        if (joint || !state.solved[index]) {
+          solve(index);
+        } else {
+          projectStack(state.volume, angles[index], projection);
+          phase.set(state.projections[index]);
+        }
+        for (let i = 0; i < projection.length; i++) difference[i] = phase[i] - projection[i];
+        backProjectStack(difference, angles[index], state.volume, relaxation);
+      };
+
+      const reset = () => {
+        state.volume.fill(0);
+        for (const p of state.projections) p.fill(0);
+        state.solved.fill(0);
+        state.cursor = 0;
+        state.passes = 0;
+        state.error = NaN;
+        state.residual = NaN;
+        state.owed = 0;
+        if (playButton.value) {
+          playButton.value = false;
+          playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+        }
+      };
+
+      const mean = (array) => {
+        let sum = 0;
+        for (let i = 0; i < array.length; i++) sum += array[i];
+        return sum / array.length;
+      };
+      const truthMean = mean(specimen.volume);
+      const measureError = () => {
+        const b = mean(state.volume);
+        let sum = 0;
+        let norm = 0;
+        for (let i = 0; i < specimen.volume.length; i++) {
+          sum += ((specimen.volume[i] - truthMean) - (state.volume[i] - b)) ** 2;
+          norm += (specimen.volume[i] - truthMean) ** 2;
+        }
+        return Math.sqrt(sum / norm);
+      };
+
+      // ---- the two scenes ----------------------------------------------------
+      //
+      // Both are drawn with one camera, which either of them can turn. The
+      // specimen is drawn as the model it is; the reconstruction is drawn as what
+      // it is, a volume, by putting a dot at every voxel above a threshold and
+      // sorting them back to front.
+      const sampling = extent / n;
+      const half = (n - 1) / 2;
+      const camera = () => makeView(0, 0, (panelSize * 0.40) / (extent / 2),
+        panelSize / 2, panelSize / 2, 0);
+
+      const rotated = (matrix) => (x, y, z, v) => {
+        const [rx, ry, rz] = applyMatrix(matrix, [x, y, z]);
+        return project(rx, ry, rz, v);
+      };
+
+      // ---- surfaces ----------------------------------------------------------
+      //
+      // An isosurface, drawn as splats rather than triangles: take the voxels
+      // that sit on the threshold — above it, with a neighbour below — give each
+      // one the direction the volume falls off in, and shade that like a surface
+      // element. It costs a pass over the grid and no mesh, and at this size it
+      // is indistinguishable from marching the cubes.
+      //
+      // Pooled two voxels at a time, which is what makes it cheap enough to
+      // rebuild as the reconstruction changes under it.
+      // Lit from over the viewer's left shoulder, in view coordinates, so the
+      // lighting stays put as the scene turns.
+      const LIGHT = [-0.42, -0.58, 0.70];
+      const drawSurface = (ctx, surface, matrix, view, base) => {
+        const drawn = [];
+        for (const p of surface.points) {
+          const [nx, ny, nz] = applyMatrix(matrix, [p.nx, p.ny, p.nz]);
+          // Facing away, so something else is in front of it: half the splats,
+          // and the inside of the membrane stops showing through.
+          if (nz <= 0) continue;
+          const [rx, ry, rz] = applyMatrix(matrix, [p.x, p.y, p.z]);
+          const q = project(rx, ry, rz, view);
+          q.shade = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
+          q.color = p.color ?? base;
+          drawn.push(q);
+        }
+        depthSort(drawn);
+        const radius = surface.step * view.zoom * 1.4;
+        ctx.save();
+        for (const q of drawn) {
+          const lit = 0.30 + 0.70 * q.shade;
+          const [r, g, b] = q.color;
+          ctx.fillStyle = `rgb(${Math.round(r * lit)},${Math.round(g * lit)},${Math.round(b * lit)})`;
+          ctx.beginPath();
+          ctx.arc(q.sx, q.sy, radius, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+        ctx.restore();
+      };
+
+      // The specimen never changes, so its surface is built once — off the finer
+      // grid, with each splat carrying the colour of whatever put it there.
+      const truthSurface = (() => {
+        const {grid, marks, size} = specimen.display;
+        const step = extent / size;
+        const middle = (size - 1) / 2;
+        let peak = 0;
+        for (let i = 0; i < grid.length; i++) if (grid[i] > peak) peak = grid[i];
+        const floor = 0.22 * peak;
+        const at = (ix, iy, iz) =>
+          (ix < 0 || iy < 0 || iz < 0 || ix >= size || iy >= size || iz >= size)
+            ? 0 : grid[(ix * size + iy) * size + iz];
+        const points = [];
+        for (let ix = 0; ix < size; ix++) {
+          for (let iy = 0; iy < size; iy++) {
+            for (let iz = 0; iz < size; iz++) {
+              const value = at(ix, iy, iz);
+              if (value < floor) continue;
+              if (Math.min(at(ix + 1, iy, iz), at(ix - 1, iy, iz), at(ix, iy + 1, iz),
+                at(ix, iy - 1, iz), at(ix, iy, iz + 1), at(ix, iy, iz - 1)) >= floor) continue;
+              const gx = at(ix + 1, iy, iz) - at(ix - 1, iy, iz);
+              const gy = at(ix, iy + 1, iz) - at(ix, iy - 1, iz);
+              const gz = at(ix, iy, iz + 1) - at(ix, iy, iz - 1);
+              const length = Math.hypot(gx, gy, gz) || 1;
+              points.push({
+                x: (ix - middle) * step, y: (iy - middle) * step, z: (iz - middle) * step,
+                nx: -gx / length, ny: -gy / length, nz: -gz / length,
+                color: LABELS[marks[(ix * size + iy) * size + iz]] ?? [190, 190, 190]
+              });
+            }
+          }
+        }
+        return {points, step};
+      })();
+
+      // The reconstruction is drawn as a volume rather than as a surface. An
+      // isosurface is a decision about where the object ends, and the specimen is
+      // the only one of the two whose edges are known — putting one around the
+      // reconstruction would draw a confidence it has not earned.
+      const cloud = [];
+      const drawVolume = (ctx, volume, matrix, view, tint) => {
+        let peak = 0;
+        for (let i = 0; i < volume.length; i++) if (volume[i] > peak) peak = volume[i];
+        if (peak <= 0) return;
+        const floor = 0.15 * peak;
+        const half = (n - 1) / 2;
+        cloud.length = 0;
+        for (let ix = 0; ix < n; ix += 2) {
+          for (let iy = 0; iy < n; iy += 2) {
+            for (let iz = 0; iz < n; iz += 2) {
+              const value = volume[(ix * n + iy) * n + iz];
+              if (value < floor) continue;
+              const [rx, ry, rz] = applyMatrix(matrix, [
+                (ix - half) * specimen.scale, (iy - half) * specimen.scale,
+                (iz - half) * specimen.scale
+              ]);
+              const p = project(rx, ry, rz, view);
+              p.value = Math.min(1, (value - floor) / (peak - floor));
+              cloud.push(p);
+            }
+          }
+        }
+        depthSort(cloud);
+        ctx.save();
+        for (const p of cloud) {
+          // Faint, because a membrane is a sheet: at any angle but edge on it
+          // covers most of the frame, and drawn solid it is a slab rather than a
+          // surface with things in it.
+          ctx.fillStyle = tint(0.05 + 0.34 * p.value * p.value);
+          ctx.beginPath();
+          ctx.arc(p.sx, p.sy, 2 * specimen.scale * view.zoom * 0.95 * (0.55 + 0.45 * p.value),
+            0, 2 * Math.PI);
+          ctx.fill();
+        }
+        ctx.restore();
+      };
+
+      const drawBeam = (ctx, matrix, view, theta, tint) => {
+        // Where the beam runs at this tilt. The specimen stays where it was put:
+        // turning the object under the reader's hands as the series advances is
+        // the same picture and a worse one to hold on to.
+        const direction = [-Math.sin(theta), 0, Math.cos(theta)];
+        const reach = extent * 0.62;
+        const ends = [-1, 1].map((sign) => {
+          const [x, y, z] = applyMatrix(matrix, direction.map((d) => d * sign * reach));
+          return project(x, y, z, view);
+        });
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = withAlpha(UI.accent, 0.85);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(ends[0].sx, ends[0].sy);
+        ctx.lineTo(ends[1].sx, ends[1].sy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = withAlpha(UI.accent, 0.85);
+        ctx.beginPath();
+        ctx.arc(ends[1].sx, ends[1].sy, 3, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+      };
+
+      const label = (ctx, text, tint) => {
+        ctx.save();
+        ctx.font = "500 10px system-ui, sans-serif";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = tint(0.75);
+        ctx.fillText(text, 7, 6);
+        ctx.restore();
+      };
+
+      // The pattern the reader is shown: one of the sixty-four the scan records
+      // at this tilt, log stretched, because it runs over several decades and its
+      // brightest pixel is the direct beam.
+      const patternCanvas = makeCanvas(panelSize, panelSize).canvas;
+      const intensity = new Float64Array(n * n);
+      const DECADES = 1e6;
+      const ceiling = Math.log1p(DECADES);
+
+      const draw = () => {
+        const matrix = quatToMatrix(viewState.quat);
+        const view = camera();
+        const foreground = currentColor(specimenPanel.canvas);
+        const tint = (alpha) => withAlpha(foreground, alpha);
+
+        {
+          const ctx = specimenPanel.ctx;
+          ctx.clearRect(0, 0, panelSize, panelSize);
+          ctx.fillStyle = tint(0.045);
+          ctx.fillRect(0, 0, panelSize, panelSize);
+          drawSurface(ctx, truthSurface, matrix, view, [200, 200, 200]);
+          drawBeam(ctx, matrix, view, angles[state.cursor], tint);
+          label(ctx, `tilt ${((180 / Math.PI) * angles[state.cursor]).toFixed(0)}°`, tint);
+          drawScalebar(ctx, {
+            extent, box: [panelSize, panelSize], corner: "bottom-left",
+            length: niceScalebarLength(extent, 0.3)
+          });
+        }
+
+        {
+          const ctx = patternPanel.ctx;
+          ctx.clearRect(0, 0, panelSize, panelSize);
+          const amplitudes = experiment[state.cursor];
+          const base = state.position * n * n;
+          let peak = 0;
+          for (let i = 0; i < intensity.length; i++) {
+            const value = amplitudes[base + i] * amplitudes[base + i];
+            intensity[i] = value;
+            if (value > peak) peak = value;
+          }
+          const scale = peak > 0 ? DECADES / peak : 0;
+          for (let i = 0; i < intensity.length; i++) {
+            intensity[i] = Math.log1p(scale * intensity[i]);
+          }
+          blit(patternCanvas,
+            applyColormap(fftshift(intensity, n, n), {colormap: "magma", vmin: 0, vmax: ceiling}),
+            n, n, {size: panelSize});
+          ctx.drawImage(patternCanvas, 0, 0, panelSize, panelSize);
+          label(ctx, `scan position ${state.position + 1} of ${m * m}`,
+            (alpha) => `rgba(255,255,255,${alpha})`);
+        }
+
+        {
+          const ctx = estimatePanel.ctx;
+          ctx.clearRect(0, 0, panelSize, panelSize);
+          ctx.fillStyle = tint(0.045);
+          ctx.fillRect(0, 0, panelSize, panelSize);
+          drawVolume(ctx, state.volume, matrix, view, tint);
+          label(ctx, state.passes > 0 ? `after ${state.passes} pass${state.passes === 1 ? "" : "es"}`
+            : "nothing yet", tint);
+          drawScalebar(ctx, {
+            extent, box: [panelSize, panelSize], corner: "bottom-left",
+            length: niceScalebarLength(extent, 0.3)
+          });
+        }
+      };
+
+      let last = performance.now();
+      let shownAt = 0;
+      for (const tick of frames({fps: 30, playing: visible})) {
+        const started = performance.now();
+        const elapsed = Math.min(0.25, (started - last) / 1000);
+        last = started;
+        // Walk the pattern panel through the scan a few times a second, so that
+        // the sixty-four patterns behind each projection are visibly sixty-four.
+        if (started - shownAt > 180) {
+          shownAt = started;
+          state.position = (state.position + 1) % (m * m);
+        }
+
+        if (pending.reset) {
+          pending.reset = false;
+          reset();
+        }
+
+        if (isRunning()) {
+          state.owed = Math.min(state.owed + elapsed * RATE, Math.max(1, budget.value));
+          const steps = Math.floor(state.owed);
+          state.owed -= steps;
+          for (let s = 0; s < steps; s++) {
+            visit(state.cursor);
+            state.cursor += 1;
+            if (state.cursor >= angles.length) {
+              state.cursor = 0;
+              state.passes += 1;
+              if (state.passes >= PASSES) {
+                playButton.value = false;
+                playButton.dispatchEvent(new CustomEvent("input", {bubbles: true}));
+                break;
+              }
+            }
+          }
+          state.error = measureError();
+        }
+
+        budget.report(performance.now() - started);
+        draw();
+        readout.textContent =
+          `${joint ? "joint" : "sequential"} · ${angleCount} tilts over ${range}° · ` +
+          `${m}×${m} scan of ${n}×${n} patterns at each · ` +
+          `${Number.isFinite(dose) ? `${dose} e⁻/Å² per tilt` : "noiseless"} · ` +
+          (Number.isFinite(state.error)
+            ? `pass ${state.passes} of ${PASSES} · ` +
+              `${(100 * state.error).toFixed(0)}% of the specimen's own rms remains` +
+              (state.passes >= PASSES ? " · converged" : "")
+            : "press play");
+        yield tick;
+      }
+    })()
+  </script>
+</notebook>

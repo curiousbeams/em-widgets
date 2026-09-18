@@ -111,6 +111,24 @@ These are the same notebooks as in `test/index.html`, but mounted through MyST's
 }
 :::
 
+## Scanning surface diffraction
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/surface-diffraction.html",
+  cells: ["controlsView", "surfaceView", "readoutView"]
+}
+:::
+
+## Joint ptychographic tomography
+
+:::{anywidget} ../observable-notebook.mjs
+{
+  notebook: "/notebooks/ptycho-tomography.html",
+  cells: ["controlsView", "tomographyView", "readoutView"]
+}
+:::
+
 ## Research overview
 
 The landing-page row. `cells` keeps the three cards and drops the prose above
