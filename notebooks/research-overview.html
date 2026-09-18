@@ -82,9 +82,12 @@
        is the host site's business, not this notebook's. -->
   <script id="5" type="text/x-typescript">
     const links = ({
+      // The page's own MyST labels, which do not move when a heading is
+      // reworded — unlike the slug a heading generates, which is how these
+      // links went stale once already.
       methods: "/research#em-method-development",
-      optics: "/research#electron-optics-instrumentation",
-      imaging: "/research#functional-imaging-of-materials-and-surfaces"
+      optics: "/research#electron-optics",
+      imaging: "/research#functional-imaging"
     })
   </script>
   <script id="6" type="text/x-typescript">
